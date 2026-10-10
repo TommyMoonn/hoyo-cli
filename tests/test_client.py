@@ -111,7 +111,9 @@ async def test_claim_keeps_failure_category_and_safe_manual_recovery() -> None:
     gateway = GenshinPyGateway(
         parse_cookie_header("ltuid=123; ltoken=test-secret-123"), client=client
     )
-    with pytest.raises(NetworkError) as caught:
+    from hoyo_cli.errors import AmbiguousClaimError
+
+    with pytest.raises(AmbiguousClaimError) as caught:
         await gateway.claim_check_in("hsr", 222222222)
     assert caught.value.code == "network_timeout"
     assert not caught.value.retryable
@@ -132,7 +134,9 @@ async def test_unknown_claim_failure_suggests_state_check_first(
     gateway = GenshinPyGateway(
         parse_cookie_header("ltuid=123; ltoken=test-secret-123"), client=client
     )
-    with pytest.raises(AppError) as caught:
+    from hoyo_cli.errors import AmbiguousClaimError
+
+    with pytest.raises(AmbiguousClaimError) as caught:
         await gateway.claim_check_in("zzz", 333333333)
     assert "today's state" in (caught.value.hint or "")
     assert not caught.value.retryable
@@ -405,10 +409,13 @@ async def test_claim_errors_are_classified_without_retry(
     gateway = GenshinPyGateway(
         parse_cookie_header("ltuid=123; ltoken=test-secret-123"), client=client
     )
-    with pytest.raises(expected) as caught:
+    from hoyo_cli.errors import AmbiguousClaimError
+
+    ambiguous = expected in (NetworkError, UnsupportedDataError)
+    with pytest.raises(AmbiguousClaimError if ambiguous else expected) as caught:
         await gateway.claim_check_in("hsr", 222222222)
     assert "test-secret-123" not in caught.value.message
-    if expected is NetworkError:
+    if ambiguous:
         assert "may have completed" in caught.value.message
     client.claim_daily_reward.assert_awaited_once_with(
         game=genshin.Game.STARRAIL, reward=False
@@ -436,7 +443,9 @@ async def test_claim_timeout_cleans_up_without_retry(
     gateway = GenshinPyGateway(
         parse_cookie_header("ltuid=123; ltoken=test-secret-123"), client=client
     )
-    with pytest.raises(NetworkError, match="may have completed"):
+    from hoyo_cli.errors import AmbiguousClaimError
+
+    with pytest.raises(AmbiguousClaimError, match="may have completed"):
         await asyncio.wait_for(gateway.claim_check_in("zzz", 333333333), timeout=1)
     assert cleaned == [True]
     client.claim_daily_reward.assert_awaited_once()
@@ -479,13 +488,56 @@ async def test_real_daily_transport_sends_one_post_and_closes_sessions(
         if expected is None:
             assert (await gateway.claim_check_in("genshin", 111111111)).reward is None
         else:
-            with pytest.raises(expected):
+            from hoyo_cli.errors import AmbiguousClaimError
+
+            claim_error = AmbiguousClaimError if retcode == -1 else expected
+            with pytest.raises(claim_error):
                 await gateway.claim_check_in("genshin", 111111111)
     assert session.request.call_count == 1
     assert session.request.call_args.args[0] == "POST"
     assert "/sign" in str(session.request.call_args.args[1])
     assert session.__aexit__.await_count == 1
     assert response.__aexit__.await_count == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "failure, ambiguous",
+    [
+        (TimeoutError("test-secret-123"), True),
+        (aiohttp.ClientPayloadError("test-secret-123"), True),
+        (aiohttp.ClientConnectionError("test-secret-123"), True),
+        (ssl.SSLError("test-secret-123"), False),
+        (genshin.errors.InvalidCookies(msg="test-secret-123"), False),
+        (genshin.errors.AlreadyClaimed(), False),
+        (genshin.errors.GenshinException({"retcode": -110}), False),
+        (genshin.errors.GenshinException({"retcode": -1}), True),
+        (genshin.errors.GenshinException({"retcode": -9999}), False),
+        (ValueError("test-secret-123"), True),
+        (RuntimeError("test-secret-123"), True),
+        (aiohttp.ClientResponseError(Mock(), (), status=400), False),
+        (aiohttp.ClientResponseError(Mock(), (), status=429), False),
+        (aiohttp.ClientResponseError(Mock(), (), status=503), True),
+    ],
+)
+async def test_claim_ambiguity_is_explicit_and_known_rejections_stay_distinct(
+    failure: Exception, ambiguous: bool
+) -> None:
+    from hoyo_cli.errors import AmbiguousClaimError
+
+    client = AsyncMock()
+    client.uids = {}
+    client.claim_daily_reward.side_effect = failure
+    gateway = GenshinPyGateway(
+        parse_cookie_header("ltuid=123; ltoken=test-secret-123"), client=client
+    )
+    with pytest.raises(AppError) as caught:
+        await gateway.claim_check_in("zzz", 333333333)
+    assert isinstance(caught.value, AmbiguousClaimError) is ambiguous
+    assert not caught.value.retryable or caught.value.code == "rate_limited"
+    assert "test-secret-123" not in f"{caught.value.message} {caught.value.hint}"
+    client.claim_daily_reward.assert_awaited_once()
+    client.get_reward_info.assert_not_called()
 
 
 @pytest.mark.asyncio

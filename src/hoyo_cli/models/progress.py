@@ -10,7 +10,13 @@ ProgressStage: TypeAlias = Literal[
     "fetching", "checking", "claiming", "verifying", "complete"
 ]
 ProgressOutcome: TypeAlias = Literal[
-    "fresh", "stale", "failed", "claimed", "already_checked_in"
+    "fresh",
+    "stale",
+    "failed",
+    "claimed",
+    "already_checked_in",
+    "claimed_verified",
+    "unconfirmed",
 ]
 
 

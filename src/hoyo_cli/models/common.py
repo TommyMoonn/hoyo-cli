@@ -71,7 +71,9 @@ class CheckInReceipt:
 @dataclass(frozen=True)
 class CheckInResult:
     game: GameId
-    outcome: Literal["claimed", "already_checked_in", "failed"]
+    outcome: Literal[
+        "claimed", "already_checked_in", "claimed_verified", "unconfirmed", "failed"
+    ]
     reward: str | None = None
     error: AppError | None = None
 

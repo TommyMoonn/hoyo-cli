@@ -107,6 +107,17 @@ class AlreadyCheckedInError(AppError):
         )
 
 
+class AmbiguousClaimError(AppError):
+    """One claim was attempted, but its response cannot confirm the outcome."""
+
+    def __init__(self, cause: AppError) -> None:
+        super().__init__(
+            f"{cause.message} Check-in may have completed.",
+            code=cause.code,
+            hint="Check today's state on HoYoLAB before trying check-in again.",
+        )
+
+
 class BrowserImportError(CredentialError):
     """A browser session cannot be read; manual input remains available."""
 

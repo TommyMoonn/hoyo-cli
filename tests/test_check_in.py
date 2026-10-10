@@ -108,6 +108,113 @@ async def test_known_already_claimed_race_is_success_without_second_claim() -> N
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("verification", [True, False, "failed"])
+async def test_ambiguous_claim_checks_state_once_and_reports_uncertainty(
+    verification: bool | str,
+) -> None:
+    from hoyo_cli.errors import AmbiguousClaimError
+
+    gateway = AsyncMock()
+    gateway.check_in_state.side_effect = [
+        CheckInState(False),
+        NetworkError("Read failed.")
+        if verification == "failed"
+        else CheckInState(verification is True),
+    ]
+    gateway.claim_check_in.side_effect = AmbiguousClaimError(
+        NetworkError("Request timed out.")
+    )
+    events: list[ProgressEvent] = []
+    (result,) = await check_in_games(gateway, {"hsr": 2}, observer=events.append)
+    assert result.outcome == (
+        "claimed_verified" if verification is True else "unconfirmed"
+    )
+    assert result.reward is None
+    assert (result.error is None) is (verification is True)
+    gateway.check_in_state.assert_has_awaits([call("hsr", 2), call("hsr", 2)])
+    assert gateway.check_in_state.await_count == 2
+    gateway.claim_check_in.assert_awaited_once_with("hsr", 2)
+    gateway.fetch_status.assert_not_called()
+    assert events == [
+        ProgressEvent("hsr", "checking"),
+        ProgressEvent("hsr", "claiming"),
+        ProgressEvent("hsr", "verifying"),
+        ProgressEvent("hsr", "complete", result.outcome),
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stage", ["checking", "claiming", "verifying"])
+async def test_reconciliation_cancellation_propagates_without_completion(
+    stage: str,
+) -> None:
+    from hoyo_cli.errors import AmbiguousClaimError
+
+    gateway = AsyncMock()
+    gateway.check_in_state.side_effect = (
+        asyncio.CancelledError
+        if stage == "checking"
+        else [CheckInState(False), asyncio.CancelledError()]
+    )
+    gateway.claim_check_in.side_effect = (
+        asyncio.CancelledError
+        if stage == "claiming"
+        else AmbiguousClaimError(NetworkError("Request timed out."))
+    )
+    events: list[ProgressEvent] = []
+    with pytest.raises(asyncio.CancelledError):
+        await check_in_games(gateway, {"zzz": 3}, observer=events.append)
+    assert not any(event.stage == "complete" for event in events)
+    assert events[-1].stage == stage
+    assert gateway.claim_check_in.await_count == (stage != "checking")
+    assert gateway.check_in_state.await_count == (2 if stage == "verifying" else 1)
+
+
+@pytest.mark.asyncio
+async def test_reconciliation_is_concurrent_isolated_and_keeps_result_order() -> None:
+    from hoyo_cli.errors import AmbiguousClaimError
+
+    gateway = AsyncMock()
+    verifying = asyncio.Event()
+    sibling_complete = asyncio.Event()
+    reads: list[tuple[GameId, int]] = []
+    events: list[ProgressEvent] = []
+
+    async def state(game: GameId, uid: int) -> CheckInState:
+        reads.append((game, uid))
+        if reads.count((game, uid)) == 2:
+            verifying.set()
+            await sibling_complete.wait()
+            return CheckInState(True)
+        return CheckInState(False)
+
+    async def claim(game: GameId, uid: int) -> CheckInReceipt:
+        if game == "hsr":
+            raise AmbiguousClaimError(NetworkError("Request timed out."))
+        await verifying.wait()
+        return CheckInReceipt("Safe reward")
+
+    def observe(event: ProgressEvent) -> None:
+        events.append(event)
+        if event == ProgressEvent("zzz", "complete", "claimed"):
+            sibling_complete.set()
+
+    gateway.check_in_state.side_effect = state
+    gateway.claim_check_in.side_effect = claim
+    results = await asyncio.wait_for(
+        check_in_games(gateway, {"hsr": 2, "zzz": 3}, observer=observe), timeout=1
+    )
+    assert [result.game for result in results] == ["hsr", "zzz"]
+    assert [result.outcome for result in results] == ["claimed_verified", "claimed"]
+    assert results[0].reward is None and results[1].reward == "Safe reward"
+    assert [e.game for e in events if e.stage == "complete"] == ["zzz", "hsr"]
+    assert reads.count(("hsr", 2)) == 2
+    assert reads.count(("zzz", 3)) == 1
+    assert len(reads) == 3
+    assert gateway.claim_check_in.await_count == 2
+
+
+@pytest.mark.asyncio
 async def test_read_finishes_before_claim_and_result_order_is_stable() -> None:
     gateway = AsyncMock()
     entered: set[GameId] = set()

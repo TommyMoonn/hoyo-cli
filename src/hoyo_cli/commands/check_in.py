@@ -67,5 +67,7 @@ def run_check_in(*, options: CommandOptions, game: GameId | None) -> None:
         configured_color=config.display_color,
     )
     console.print(render_check_in(results, account=name))
-    if not results or any(result.outcome == "failed" for result in results):
+    if not results or any(
+        result.outcome in ("failed", "unconfirmed") for result in results
+    ):
         raise click.exceptions.Exit(1)

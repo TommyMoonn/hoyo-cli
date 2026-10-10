@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import cast
 
 import pytest
+from rich.cells import cell_len
 from rich.console import Console
 from rich.text import Text
 
@@ -16,6 +17,7 @@ from hoyo_cli.errors import AppError, NetworkError
 from hoyo_cli.hoyolab.adapters.genshin import normalize_genshin
 from hoyo_cli.hoyolab.adapters.zzz import normalize_zzz
 from hoyo_cli.models.common import (
+    CheckInResult,
     CountStatus,
     GameId,
     GameStatus,
@@ -26,12 +28,60 @@ from hoyo_cli.models.common import (
 from hoyo_cli.models.genshin import GenshinStatus
 from hoyo_cli.models.hsr import HSRStatus
 from hoyo_cli.models.zzz import ZZZStatus
+from hoyo_cli.render.check_in import render_check_in
 from hoyo_cli.render.console import make_console
 from hoyo_cli.render.game import render_game
 from hoyo_cli.render.overview import render_overview
 from hoyo_cli.render.widths import choose_layout
 
 NOW = datetime(2026, 10, 10, 18, 31, tzinfo=timezone(timedelta(hours=7)))
+
+
+@pytest.mark.parametrize("width", [48, 70, 100])
+@pytest.mark.parametrize("color", [True, False])
+def test_check_in_labels_and_subordinate_hints_wrap_cleanly(
+    width: int, color: bool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from hoyo_cli.errors import AmbiguousClaimError
+
+    error = AmbiguousClaimError(NetworkError("Request timed out."))
+    monkeypatch.delenv("NO_COLOR", raising=False)
+    monkeypatch.setenv("TERM", "xterm-256color")
+    results = (
+        CheckInResult("genshin", "claimed", reward="20 Primogems"),
+        CheckInResult("hsr", "already_checked_in"),
+        CheckInResult("zzz", "claimed_verified"),
+        CheckInResult("hsr", "unconfirmed", error=error),
+        CheckInResult("zzz", "failed", error=NetworkError("Request timed out.")),
+    )
+    console = make_console(
+        width=width, no_color=not color, interactive=color, configured_color="auto"
+    )
+    with console.capture() as captured:
+        console.print(render_check_in(results, account="main"))
+    output = captured.get()
+    plain = Text.from_ansi(output).plain
+    for label in (
+        "Claimed",
+        "Already checked in",
+        "Claimed (verified)",
+        "Unconfirmed",
+        "Failed",
+    ):
+        assert label in plain
+    assert "20 Primogems" in plain
+    assert "Check today's state on HoYoLAB" in " ".join(plain.split())
+    assert all(cell_len(line) <= width for line in plain.splitlines())
+    assert "…" not in plain
+    assert all(
+        "Error:" not in line and "Try:" not in line
+        for line in plain.splitlines()
+        if "Honkai:" in line or "Zenless" in line
+    )
+    if not color:
+        assert "\x1b" not in output
+    else:
+        assert "\x1b" in output
 
 
 @pytest.fixture

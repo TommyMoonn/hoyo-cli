@@ -3,7 +3,7 @@
 import asyncio
 from collections.abc import Mapping
 
-from hoyo_cli.errors import AlreadyCheckedInError, AppError
+from hoyo_cli.errors import AlreadyCheckedInError, AmbiguousClaimError, AppError
 from hoyo_cli.hoyolab.client import HoyolabGateway
 from hoyo_cli.models.common import CheckInResult, GameId
 from hoyo_cli.models.progress import ProgressEvent, ProgressObserver, notify_progress
@@ -27,7 +27,10 @@ async def check_in_games(
             if state.already_checked_in:
                 return CheckInResult(game, "already_checked_in")
             notify_progress(observer, ProgressEvent(game, "claiming"))
-            receipt = await gateway.claim_check_in(game, uid)
+            try:
+                receipt = await gateway.claim_check_in(game, uid)
+            except AmbiguousClaimError as error:
+                return await reconcile(game, uid, error)
             return CheckInResult(game, "claimed", reward=receipt.reward)
         except AlreadyCheckedInError:
             # Another caller may have claimed between our state read and action.
@@ -42,6 +45,22 @@ async def check_in_games(
                 )
             )
             return CheckInResult(game, "failed", error=error)
+
+    async def reconcile(
+        game: GameId, uid: int, error: AmbiguousClaimError
+    ) -> CheckInResult:
+        notify_progress(observer, ProgressEvent(game, "verifying"))
+        try:
+            state = await gateway.check_in_state(game, uid)
+            if state.already_checked_in:
+                return CheckInResult(game, "claimed_verified")
+        except AlreadyCheckedInError:
+            return CheckInResult(game, "claimed_verified")
+        except Exception:
+            # Failed or negative verification cannot disprove a completed write.
+            # Keep the safe claim error, rather than leaking read diagnostics.
+            pass
+        return CheckInResult(game, "unconfirmed", error=error)
 
     outcomes = await asyncio.gather(
         *(check_one(game, uid) for game, uid in requested.items()),

@@ -3,6 +3,7 @@
 from collections.abc import Sequence
 
 from rich.console import Group
+from rich.padding import Padding
 from rich.table import Table
 from rich.text import Text
 
@@ -12,24 +13,33 @@ from hoyo_cli.render.styles import GAME_HEADINGS
 
 
 def render_check_in(results: Sequence[CheckInResult], *, account: str) -> Group:
-    table = Table.grid(padding=(0, 2))
-    table.add_column(no_wrap=True)
-    table.add_column()
+    rows: list[Table | Padding] = []
+    name_width = max((len(GAME_HEADINGS[result.game]) for result in results), default=0)
     for result in results:
+        table = Table.grid(padding=(0, 2))
+        table.add_column(no_wrap=True, width=name_width)
+        table.add_column()
         name = Text(GAME_HEADINGS[result.game].title(), style=f"game.{result.game}")
         if result.outcome == "claimed":
             outcome = Text("Claimed", style="success")
-            if result.reward is not None:
-                outcome.append(f" · {result.reward}", style="text")
         elif result.outcome == "already_checked_in":
             outcome = Text("Already checked in", style="success")
+        elif result.outcome == "claimed_verified":
+            outcome = Text("Claimed (verified)", style="success")
+        elif result.outcome == "unconfirmed":
+            outcome = Text("Unconfirmed", style="warning")
         else:
-            outcome = Text("Failed\n", style="error")
-            outcome.append(
+            outcome = Text("Failed", style="error")
+        table.add_row(name, outcome)
+        rows.append(table)
+        if result.outcome == "claimed" and result.reward is not None:
+            rows.append(Padding(Text(result.reward, style="text"), (0, 0, 0, 2)))
+        if result.outcome in ("failed", "unconfirmed"):
+            detail = Text(
                 format_error(result.error)
                 if result.error is not None
                 else "Error: Check-in failed.",
-                style="error",
+                style="warning" if result.outcome == "unconfirmed" else "error",
             )
-        table.add_row(name, outcome)
-    return Group(Text(f"Check-in · {account}", style="heading"), table)
+            rows.append(Padding(detail, (0, 0, 0, 2)))
+    return Group(Text(f"Check-in · {account}", style="heading"), *rows)

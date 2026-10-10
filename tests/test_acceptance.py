@@ -88,6 +88,67 @@ RESOURCE: dict[GameId, tuple[str, str]] = {
 }
 
 
+@pytest.mark.parametrize("width", [48, 70, 100])
+@pytest.mark.parametrize("verification", [True, False, "failed", "delayed"])
+@pytest.mark.parametrize("single_game", [True, False])
+def test_ambiguous_claim_is_reconciled_without_another_mutation(
+    runner: CliRunner,
+    acceptance_env: AcceptanceEnvironment,
+    width: int,
+    verification: bool | str,
+    single_game: bool,
+) -> None:
+    acceptance_env.width = width
+    reads: dict[genshin.Game, int] = {}
+
+    async def state(*, game: genshin.Game) -> genshin.models.DailyRewardInfo:
+        reads[game] = reads.get(game, 0) + 1
+        if game == genshin.Game.STARRAIL and reads[game] > 1:
+            if verification == "failed":
+                raise genshin.errors.InvalidCookies(msg="acceptance-secret-not-real")
+            if verification == "delayed":
+                raise TimeoutError("acceptance-secret-not-real")
+            return genshin.models.DailyRewardInfo(verification is True, 1)
+        return genshin.models.DailyRewardInfo(game == genshin.Game.ZZZ, 0)
+
+    async def claim(*, game: genshin.Game, reward: bool) -> None:
+        if game == genshin.Game.STARRAIL:
+            raise TimeoutError("acceptance-secret-not-real")
+
+    acceptance_env.client.get_reward_info.side_effect = state
+    acceptance_env.client.claim_daily_reward.side_effect = claim
+    arguments = ["check-in", *(["hsr"] if single_game else []), "--no-color"]
+    result = runner.invoke(main, arguments)
+    assert result.exit_code == (0 if verification is True else 1), result.output
+    assert ("Claimed (verified)" if verification is True else "Unconfirmed") in (
+        result.stdout
+    )
+    assert "Failed" not in result.stdout
+    if verification is not True:
+        assert "Check today's state on HoYoLAB" in " ".join(result.stdout.split())
+    if not single_game:
+        assert "Genshin Impact" in result.stdout and "Claimed" in result.stdout
+        assert "Zenless Zone Zero" in result.stdout
+        assert "Already checked in" in result.stdout
+    assert not result.stderr
+    assert all(cell_len(line) <= width for line in result.stdout.splitlines())
+    assert all(
+        value not in result.output
+        for value in ("acceptance-secret-not-real", "Traceback", "\x1b", "…")
+    )
+    claims = acceptance_env.client.claim_daily_reward.await_args_list
+    assert claims.count(call(game=genshin.Game.STARRAIL, reward=False)) == 1
+    assert len(claims) == (1 if single_game else 2)
+    # A reconciliation query uses the gateway's existing two-attempt read budget.
+    assert reads[genshin.Game.STARRAIL] == (3 if verification == "delayed" else 2)
+    assert all(
+        entry[0] in ("get_reward_info", "claim_daily_reward")
+        for entry in acceptance_env.client.mock_calls
+    )
+    for game in GAME_IDS:
+        acceptance_env.notes(game).assert_not_called()
+
+
 @pytest.mark.parametrize("arguments", [[], ["status"], ["--account", "alt"]])
 def test_all_three_fresh(
     runner: CliRunner, acceptance_env: AcceptanceEnvironment, arguments: list[str]

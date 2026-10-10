@@ -132,7 +132,19 @@ for _game in GAME_IDS:
 def check_in_command(
     ctx: click.Context, game: GameId | None, account: str | None, no_color: bool
 ) -> None:
-    """Explicitly claim daily rewards for all enabled games, or GAME."""
+    """Explicitly claim daily rewards for all enabled games, or GAME.
+
+    Today's state is checked with a network request for each game. Already
+    checked-in games are then skipped without a claim. An uncertain claim gets
+    one read-only state check; claims are never automatically retried.
+
+    \b
+    Examples:
+      hoyo check-in
+      hoyo check-in genshin
+      hoyo check-in hsr
+      hoyo check-in zzz
+    """
     check_in.run_check_in(
         options=_resolve_options(ctx, account=account, no_color=no_color), game=game
     )

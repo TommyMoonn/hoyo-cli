@@ -15,6 +15,7 @@ from genshin.client.manager import managers
 from hoyo_cli.auth.credentials import Credentials
 from hoyo_cli.errors import (
     AlreadyCheckedInError,
+    AmbiguousClaimError,
     AppError,
     AuthenticationError,
     ConfigError,
@@ -162,7 +163,11 @@ async def request_with_retry(
 
 
 async def _request(
-    operation: Callable[[], Awaitable[T]], *, timeout_seconds: float, attempts: int
+    operation: Callable[[], Awaitable[T]],
+    *,
+    timeout_seconds: float,
+    attempts: int,
+    mutation: bool = False,
 ) -> T:
     if not math.isfinite(timeout_seconds) or timeout_seconds <= 0:
         raise ValueError("Request timeout must be finite and positive.")
@@ -171,10 +176,26 @@ async def _request(
             return await asyncio.wait_for(operation(), timeout=timeout_seconds)
         except Exception as error:
             classified = _classify(error)
+            if mutation and _claim_outcome_is_ambiguous(error, classified):
+                raise AmbiguousClaimError(classified) from None
             if attempt + 1 < attempts and classified.retryable:
                 continue
             raise classified from None
     raise AssertionError("Unreachable request state.")
+
+
+def _claim_outcome_is_ambiguous(error: Exception, classified: AppError) -> bool:
+    # A returned rejection, including HTTP 4xx, is a known outcome. Transport,
+    # server, and response-decoding failures can occur after the write completed.
+    if isinstance(error, aiohttp.ClientResponseError) and 400 <= error.status < 500:
+        return False
+    return classified.code in (
+        ErrorCode.NETWORK_TIMEOUT,
+        ErrorCode.CONNECTIVITY,
+        ErrorCode.SERVER_ERROR,
+        ErrorCode.UNSUPPORTED_DATA,
+        ErrorCode.UNEXPECTED,
+    )
 
 
 async def _fetch(credentials: Credentials) -> Sequence[genshin.models.GenshinAccount]:
@@ -267,31 +288,15 @@ class GenshinPyGateway:
 
     async def claim_check_in(self, game: GameId, uid: int) -> CheckInReceipt:
         selected = self._select_check_in_game(game, uid)
-        try:
-            await _request(
-                # The sign endpoint confirms the action but returns no reward.
-                # Disable upstream's follow-up reads, which can fail after a
-                # successful mutation and otherwise obscure its real outcome.
-                lambda: self._client.claim_daily_reward(game=selected, reward=False),
-                timeout_seconds=REQUEST_TIMEOUT_SECONDS,
-                attempts=1,
-            )
-        except NetworkError as error:
-            raise NetworkError(
-                f"{error.message} Check-in may have completed; "
-                "check today's state before trying again.",
-                transient=False,
-                code=error.code,
-                hint="Check today's state on HoYoLAB before trying check-in again.",
-            ) from None
-        except AppError as error:
-            if error.code in (ErrorCode.UNEXPECTED, ErrorCode.UNSUPPORTED_DATA):
-                # Preserve the classified error; its recovery must account for
-                # a write that could have completed before the response failed.
-                error.hint = (
-                    "Check today's state on HoYoLAB before trying check-in again."
-                )
-            raise
+        await _request(
+            # The sign endpoint confirms the action but returns no reward.
+            # Disable upstream's follow-up reads, which can fail after a
+            # successful mutation and otherwise obscure its real outcome.
+            lambda: self._client.claim_daily_reward(game=selected, reward=False),
+            timeout_seconds=REQUEST_TIMEOUT_SECONDS,
+            attempts=1,
+            mutation=True,
+        )
         return CheckInReceipt()
 
     def _select_check_in_game(self, game: GameId, uid: int) -> genshin.Game:

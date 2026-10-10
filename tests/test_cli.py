@@ -793,6 +793,20 @@ def test_checkin_already_checked_in_is_success(
     check_in_gateway.claim_check_in.assert_not_called()
 
 
+def test_check_in_help_explains_targeting_and_state_reads(runner: CliRunner) -> None:
+    result = runner.invoke(main, ["check-in", "--help"])
+    assert result.exit_code == 0
+    for command in (
+        "hoyo check-in",
+        "hoyo check-in genshin",
+        "hoyo check-in hsr",
+        "hoyo check-in zzz",
+    ):
+        assert command in result.output
+    assert "checked" in result.output and "skipped" in result.output
+    assert "network request" in result.output
+
+
 def test_checkin_all_action_auth_failures_exit_1(
     runner: CliRunner, check_in_gateway: AsyncMock
 ) -> None:

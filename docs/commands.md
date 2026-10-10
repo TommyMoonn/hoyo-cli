@@ -56,18 +56,32 @@ hoyo check-in
 ```
 
 This claims daily HoYoLAB rewards for every enabled game on the selected account.
-To request only Zenless Zone Zero:
+To request one game:
 
 ```powershell
+hoyo check-in genshin
+hoyo check-in hsr
 hoyo check-in zzz
 ```
 
 The command takes action immediately, with no additional confirmation. It checks
-today's claim state first and reports `Claimed`, `Already checked in`, or an error
-for each game. A failure does not hide the other results.
+today's claim state with a network request for each game, then skips the claim
+if already checked in. A failure does not hide the other results.
 
-If a claim times out or loses its connection, it may have completed. Check today's
-state on HoYoLAB before trying again. Claims are not automatically retried.
+| Result | Meaning |
+| --- | --- |
+| `Claimed` | HoYoLAB confirmed the claim response |
+| `Already checked in` | Today's reward was already claimed; no further claim is sent |
+| `Claimed (verified)` | The claim response was uncertain, but a fresh state check confirmed check-in |
+| `Unconfirmed` | The claim may have completed, but the fresh state check could not confirm it |
+| `Failed` | A state check or known claim rejection prevented completion |
+
+If a claim times out, loses its connection, or returns an unreadable response,
+the command makes one fresh read-only state query using the usual bounded read
+retry policy. A positive state confirms completion. A negative or failed query
+leaves the outcome `Unconfirmed`, since it cannot prove the claim did not complete.
+Check today's state on HoYoLAB before trying again. Claims are not automatically
+retried, and no background polling runs.
 If HoYoLAB requires verification, complete check-in on its website.
 
 Daily rewards apply to the authenticated HoYoLAB account and game rather than
@@ -79,7 +93,7 @@ Check-in does not fetch the status dashboard or use its cache.
 | Code | Meaning |
 | --- | --- |
 | `0` | Status has at least one usable fresh or cached game result; check-in succeeded for every requested game |
-| `1` | No usable status results, a check-in failure, or another operational error |
+| `1` | No usable status results, a failed or unconfirmed check-in, or another operational error |
 | `2` | Invalid usage or configuration |
 | `3` | Missing, invalid, or inaccessible credentials before game requests start |
 
