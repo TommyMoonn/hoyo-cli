@@ -1,0 +1,30 @@
+# Python environments, bytecode, and development caches
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.pyright/
+.coverage
+.coverage.*
+htmlcov/
+
+# Build output
+dist/
+build/
+*.egg-info/
+
+# Credentials and local test artifacts
+.hoyo/
+credentials.toml
+.env
+.env.*
+cookies.txt
+cookies.json
+*.local.toml
+
+# Local project records and scratch work
+.project/
+.planning/
+.scratch/

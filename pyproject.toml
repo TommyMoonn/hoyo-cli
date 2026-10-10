@@ -1,0 +1,53 @@
+[project]
+name = "hoyo-cli"
+version = "0.1.0"
+description = "Local HoYoLAB status CLI for Genshin Impact, Honkai: Star Rail, and Zenless Zone Zero"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "browser-cookie3>=0.20.1",
+    "click>=8.5.0",
+    "genshin==1.7.31",
+    "keyring>=25.7.0",
+    "platformdirs>=4.12.4",
+    "rich>=15.0.0",
+    "tomlkit>=0.15.1",
+]
+
+[project.scripts]
+hoyo = "hoyo_cli.cli:main"
+
+[build-system]
+requires = ["uv_build>=0.12.23,<0.13.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "pyright>=1.1.414",
+    "pytest>=9.1.1",
+    "pytest-asyncio>=1.4.0",
+    "ruff>=0.17.0",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "strict"
+asyncio_default_fixture_loop_scope = "function"
+asyncio_default_test_loop_scope = "function"
+filterwarnings = ["error"]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 88
+src = ["src"]
+extend-exclude = ["specs", "docs/plans"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+
+[tool.pyright]
+include = ["src", "tests"]
+pythonVersion = "3.11"
+typeCheckingMode = "strict"
+venvPath = "."
+venv = ".venv"
