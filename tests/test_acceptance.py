@@ -1,5 +1,6 @@
 """Spec acceptance through the CLI, with only external boundaries replaced."""
 
+import re
 import subprocess
 import sys
 from datetime import timedelta
@@ -317,21 +318,52 @@ def test_plaintext_fallback_is_separate(
         assert "acceptance-secret-not-real" not in path.read_text()
 
 
-def test_readme_documents_main_commands() -> None:
-    readme = (Path(__file__).parents[1] / "README.md").read_text()
-    for command in (
-        "uv sync",
-        "uv run hoyo --help",
-        "uv tool install .",
-        "uv tool uninstall hoyo-cli",
-        "hoyo init",
-        "hoyo genshin --detailed",
-        "hoyo --account alt",
-        "hoyo check-in zzz",
-        "hoyo config --edit",
-        "--live-read-only",
-    ):
-        assert command in readme, f"Missing documented command: {command}"
+def test_readme_links_to_user_guides() -> None:
+    root = Path(__file__).parents[1]
+    documents = (
+        "README.md",
+        "docs/setup.md",
+        "docs/commands.md",
+        "docs/configuration.md",
+        "docs/development.md",
+    )
+    readme = (root / "README.md").read_text(encoding="utf-8")
+    readme_links = re.findall(r"\[[^\]]+\]\(([^)]+)\)", readme)
+    for guide in documents[1:]:
+        assert guide in readme_links, f"Missing guide link: {guide}"
+    for document in documents:
+        path = root / document
+        contents = path.read_text(encoding="utf-8")
+        for link in re.findall(r"\[[^\]]+\]\(([^)]+)\)", contents):
+            if "://" in link or link.startswith("#"):
+                continue
+            target = link.partition("#")[0]
+            assert (path.parent / target).is_file(), (
+                f"Broken link in {document}: {link}"
+            )
+
+
+@pytest.mark.parametrize(
+    ("document", "commands"),
+    [
+        ("README.md", ("uv tool install .", "hoyo init", "hoyo genshin --detailed")),
+        ("docs/setup.md", ("hoyo init", "hoyo --account alt")),
+        (
+            "docs/commands.md",
+            ("hoyo check-in zzz", "hoyo config --edit", "uv tool uninstall hoyo-cli"),
+        ),
+        ("docs/configuration.md", ("hoyo config", "hoyo config --edit")),
+        ("docs/development.md", ("uv sync", "uv run hoyo --help", "--live-read-only")),
+    ],
+)
+def test_user_documentation_covers_commands(
+    document: str, commands: tuple[str, ...]
+) -> None:
+    contents = (Path(__file__).parents[1] / document).read_text(encoding="utf-8")
+    for command in commands:
+        assert command in contents, (
+            f"Missing documented command in {document}: {command}"
+        )
 
 
 def test_live_test_is_opt_in() -> None:
