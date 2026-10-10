@@ -19,6 +19,16 @@ Status fetching and check-in remain unavailable. Those unfinished commands
 print a concise "not configured yet" error and exit with code `2`.
 Setup makes a read-only linked-account request; no command claims rewards yet.
 
+Phase 4 adds immutable status snapshots, a bounded read-only HoYoLAB gateway,
+Genshin notes normalization, and compact/focused/detailed Rich views. The views
+have explicit wide (80+), medium (60-79), and narrow (below 60) layouts.
+The gateway disables automatic notes authorization and uses at most two
+10-second attempts for transient read failures. Authentication and unsupported
+data failures are not retried. Application retry control is isolated against
+the pinned library's internal retries, preserving its per-request session cleanup.
+Status command wiring and HSR/ZZZ mapping remain Phase 5 work; these internal
+Genshin capabilities are not yet exposed through `hoyo status` or game aliases.
+
 ## Prerequisites
 
 Use Python 3.11 or newer and [uv](https://docs.astral.sh/uv/). Development uses

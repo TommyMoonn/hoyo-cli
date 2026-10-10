@@ -28,3 +28,13 @@ class AuthenticationError(CredentialError):
 
 class BrowserImportError(CredentialError):
     """A browser session cannot be read; manual input remains available."""
+
+
+class NetworkError(AppError):
+    def __init__(self, message: str, *, transient: bool = True) -> None:
+        super().__init__(message)
+        self.transient = transient
+
+
+class UnsupportedDataError(AppError):
+    """The configured operation or returned data cannot be represented safely."""

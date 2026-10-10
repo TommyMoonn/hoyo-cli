@@ -1,0 +1,34 @@
+{
+  "current_resin": 190,
+  "max_resin": 200,
+  "resin_recovery_time": "4560",
+  "current_home_coin": 930,
+  "max_home_coin": 2400,
+  "home_coin_recovery_time": "115200",
+  "finished_task_num": 4,
+  "total_task_num": 4,
+  "is_extra_task_reward_received": true,
+  "remain_resin_discount_num": 2,
+  "resin_discount_num_limit": 3,
+  "max_expedition_num": 5,
+  "expeditions": [
+    {"avatar_side_icon": "https://example.invalid/avatar-a.png", "status": "Finished", "remained_time": "0"},
+    {"avatar_side_icon": "https://example.invalid/avatar-b.png", "status": "Ongoing", "remained_time": "8040"}
+  ],
+  "transformer": {"obtained": true, "recovery_time": {"Day": 2, "Hour": 4, "Minute": 0, "Second": 0}},
+  "daily_task": {
+    "total_num": 4,
+    "finished_num": 4,
+    "is_extra_task_reward_received": true,
+    "task_rewards": [{"status": "TaskRewardStatusTakenAward"}],
+    "attendance_rewards": [{"status": "AttendanceRewardStatusWaitTaken", "progress": 100}],
+    "attendance_visible": true,
+    "stored_attendance": 12.5
+  },
+  "archon_quest_progress": {
+    "list": [{"id": 1, "status": "StatusOngoing", "chapter_num": "Chapter I", "chapter_title": "Test chapter"}],
+    "is_finish_all_mainline": false,
+    "is_open_archon_quest": true,
+    "is_finish_all_interchapter": false
+  }
+}
