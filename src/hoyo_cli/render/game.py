@@ -29,6 +29,7 @@ class _Row:
     secondary: str = ""
     primary_style: str = "text"
     secondary_style: str = "muted"
+    inline_values: bool = False
 
 
 def _state_style(state: str) -> str:
@@ -119,7 +120,18 @@ def _genshin_rows(
         ]
     )
     if focused or detailed:
-        rows.extend(_activity_rows(status.expeditions, detailed, now))
+        rows.extend(
+            _Row(
+                activity.label,
+                _activity(activity, now),
+                format_local_timestamp(activity.completes_at, now)
+                if activity.completes_at is not None
+                else "",
+                primary_style=_state_style(activity.state),
+                inline_values=True,
+            )
+            for activity in status.expeditions
+        )
     if detailed:
         if not stale and resin.full_at is not None:
             rows.append(
@@ -396,6 +408,20 @@ class _GameView:
             yield table
         else:
             for row in rows:
+                if row.inline_values:
+                    # Keep short values together; wrapped text stays under its
+                    # value column without repeating the activity label.
+                    table = Table.grid(padding=(0, 2))
+                    table.add_column(
+                        min_width=21 if layout == "medium" else 0, no_wrap=True
+                    )
+                    table.add_column()
+                    value = styled(row.primary, row.primary_style)
+                    if row.secondary:
+                        value += Text("  ") + styled(row.secondary, row.secondary_style)
+                    table.add_row(Text(row.label), value)
+                    yield table
+                    continue
                 if layout == "medium":
                     yield Text(f"{row.label:<21}  ") + styled(
                         row.primary, row.primary_style

@@ -3,13 +3,14 @@
 import json
 from collections.abc import Callable
 from dataclasses import replace
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta, timezone
 from io import StringIO
 from pathlib import Path
 from typing import cast
 
 import pytest
 from rich.console import Console
+from rich.text import Text
 
 from hoyo_cli.errors import AppError, NetworkError
 from hoyo_cli.hoyolab.adapters.genshin import normalize_genshin
@@ -20,6 +21,7 @@ from hoyo_cli.models.common import (
     GameStatus,
     ResourceStatus,
     StatusResult,
+    TimedActivity,
 )
 from hoyo_cli.models.genshin import GenshinStatus
 from hoyo_cli.models.hsr import HSRStatus
@@ -158,6 +160,129 @@ def test_focused_shows_individual_expeditions(status_snapshot: GenshinStatus) ->
     assert "Archon" not in output
 
 
+@pytest.mark.parametrize("width", [48, 70, 100])
+@pytest.mark.parametrize("detailed", [False, True])
+@pytest.mark.parametrize("color", [False, True])
+def test_expedition_times_share_one_entry(
+    status_snapshot: GenshinStatus,
+    color_console: Callable[[int], Console],
+    width: int,
+    detailed: bool,
+    color: bool,
+) -> None:
+    # Store UTC deadlines to exercise conversion to the injected local clock.
+    def deadline(delta: timedelta) -> datetime:
+        return (NOW + delta).astimezone(UTC)
+
+    activities = (
+        TimedActivity("Expedition 1", "Finished"),
+        TimedActivity("Expedition 2", "Ongoing"),
+        TimedActivity("Expedition 3", "Unavailable"),
+        TimedActivity("Expedition 4", "Ongoing", deadline(timedelta(hours=2))),
+        TimedActivity("Expedition 5", "Ongoing", deadline(timedelta(hours=8))),
+        TimedActivity("Expedition 6", "Ongoing", deadline(timedelta(days=10))),
+        TimedActivity("Expedition 7", "Ongoing", deadline(timedelta(hours=-1))),
+    )
+    snapshot = replace(status_snapshot, expeditions=activities, max_expeditions=7)
+    console = (
+        color_console(width)
+        if color
+        else Console(file=StringIO(), width=width, color_system=None)
+    )
+    console.print(render_game(snapshot, detailed=detailed, focused=True, now=NOW))
+    raw = cast(StringIO, console.file).getvalue()
+    assert ("\x1b[" in raw) == color
+    output = Text.from_ansi(raw).plain
+    expected = (
+        ("Finished", ""),
+        ("Ongoing", ""),
+        ("Data unavailable", ""),
+        ("2h", "20:31"),
+        ("8h", "Sun 02:31"),
+        ("10d", "Oct 20 · 18:31"),
+        ("Completion time elapsed", "17:31"),
+    )
+    assert "7 / 7" in output and output.count("1 finished") == 1
+    positions = [output.index(activity.label) for activity in activities]
+    assert positions == sorted(positions)
+    for index, (activity, (primary, timestamp)) in enumerate(
+        zip(activities, expected, strict=True)
+    ):
+        assert output.count(activity.label) == 1
+        assert f"{activity.label} at" not in output
+        end = positions[index + 1] if index + 1 < len(positions) else len(output)
+        entry = output[positions[index] : end]
+        assert primary in entry
+        if timestamp:
+            assert timestamp in entry
+            assert any(
+                activity.label in line and primary in line and timestamp in line
+                for line in entry.splitlines()
+            )
+        else:
+            assert ":" not in entry
+    assert "…" not in output
+    assert all(len(line) <= width for line in output.splitlines())
+
+
+@pytest.mark.parametrize("width", [48, 70, 100])
+@pytest.mark.parametrize("detailed", [False, True])
+def test_expedition_wraps_as_an_indented_continuation(
+    status_snapshot: GenshinStatus, width: int, detailed: bool
+) -> None:
+    activity = TimedActivity("Expedition 1", "Ongoing", NOW.replace(year=2025))
+    snapshot = replace(status_snapshot, expeditions=(activity,))
+    output = render_text(snapshot, width, focused=True, detailed=detailed)
+    entry = output[output.index(activity.label) :].split("Resin full at")[0]
+    # The label, elapsed prediction, and year-bearing timestamp exceed 48 columns.
+    assert output.count(activity.label) == 1
+    assert f"{activity.label} at" not in output
+    assert "Completion time elapsed" in entry
+    assert "Oct 10 2025 · 18:31" in " ".join(entry.split())
+    lines = entry.splitlines()
+    if width == 48:
+        assert len(lines) > 1
+        assert lines[1].startswith("  ")
+    else:
+        assert "Completion time elapsed" in lines[0]
+        assert "Oct 10 2025 · 18:31" in lines[0]
+    assert "…" not in output
+    assert all(len(line) <= width for line in output.splitlines())
+
+
+@pytest.mark.parametrize("width", [48, 70, 100])
+def test_stale_expedition_prediction_does_not_become_finished(
+    status_snapshot: GenshinStatus, width: int
+) -> None:
+    output = StringIO()
+    now = NOW + timedelta(hours=3)
+    Console(file=output, width=width, color_system=None).print(
+        render_overview(
+            (
+                StatusResult(
+                    "genshin",
+                    status_snapshot,
+                    NOW,
+                    stale=True,
+                    error=NetworkError("Timeout."),
+                ),
+            ),
+            account="main",
+            detailed=True,
+            focused=True,
+            now=now,
+        )
+    )
+    text = output.getvalue()
+    assert "STALE · fetched 3h ago" in text
+    assert text.count("1 finished") == 1
+    assert text.count("Finished") == 1
+    assert text.count("Expedition 2") == 1
+    assert "Completion time elapsed" in text and "20:45" in text
+    assert "190 / 200" in text
+    assert all(len(line) <= width for line in text.splitlines())
+
+
 def test_detailed_has_only_intentional_fields(status_snapshot: GenshinStatus) -> None:
     output = render_text(status_snapshot, detailed=True)
     assert "Stored Encounter" in output and "12.5" in output
@@ -206,8 +331,8 @@ def test_active_deadlines_remain_in_detailed_output(
 ) -> None:
     output = render_text(status_snapshot, width, detailed=True)
     assert "Expedition 1 at" not in output
+    assert output.count("Expedition 2") == 1 and "20:45" in output
     for label, deadline in (
-        ("Expedition 2 at", "20:45"),
         ("Resin full at", "19:47"),
         ("Realm full at", "Mon 02:31"),
         ("Transformer ready", "Mon 22:31"),
@@ -227,7 +352,8 @@ def test_renderer_preserves_explicit_historical_completion_time(
     )
     snapshot = replace(status_snapshot, expeditions=(activity,))
     output = render_text(snapshot, detailed=True)
-    assert "Finished" in output and "Expedition 1 at" in output and "17:31" in output
+    assert "Finished" in output and "17:31" in output
+    assert output.count("Expedition 1") == 1 and "Expedition 1 at" not in output
 
 
 @pytest.mark.parametrize(

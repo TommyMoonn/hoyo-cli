@@ -108,6 +108,44 @@ def test_all_three_fresh(
 
 @pytest.mark.parametrize("width", [48, 70, 100])
 @pytest.mark.parametrize("detailed", [False, True])
+@pytest.mark.parametrize("command", [["genshin"], ["status", "genshin"]])
+def test_genshin_expedition_times_are_combined_through_cli(
+    runner: CliRunner,
+    acceptance_env: AcceptanceEnvironment,
+    width: int,
+    detailed: bool,
+    command: list[str],
+) -> None:
+    acceptance_env.width = width
+    flags = ["--no-color", *(["--detailed"] if detailed else [])]
+    result = runner.invoke(main, [*command, *flags])
+    assert result.exit_code == 0, result.output
+    assert result.stdout.count("Expedition 1") == 1
+    assert result.stdout.count("Expedition 2") == 1
+    assert "Expedition 1 at" not in result.output
+    assert "Expedition 2 at" not in result.output
+    assert "2 / 5" in result.stdout and "1 finished" in result.stdout
+    local_finish = (acceptance_env.now + timedelta(hours=2, minutes=14)).strftime(
+        "%H:%M"
+    )
+    assert any(
+        "Expedition 2" in line and "2h 14m" in line and local_finish in line
+        for line in result.stdout.splitlines()
+    )
+    assert "Finished" in result.stdout
+    assert not result.stderr and "\x1b" not in result.output
+    assert all(cell_len(line) <= width for line in result.output.splitlines())
+    acceptance_env.notes("genshin").assert_awaited_once_with(
+        TEST_UIDS["genshin"], autoauth=False, return_raw_data=True
+    )
+    acceptance_env.notes("hsr").assert_not_called()
+    acceptance_env.notes("zzz").assert_not_called()
+    acceptance_env.client.get_reward_info.assert_not_called()
+    acceptance_env.client.claim_daily_reward.assert_not_called()
+
+
+@pytest.mark.parametrize("width", [48, 70, 100])
+@pytest.mark.parametrize("detailed", [False, True])
 def test_daily_state_hierarchy_remains_clear_without_color(
     runner: CliRunner,
     acceptance_env: AcceptanceEnvironment,
