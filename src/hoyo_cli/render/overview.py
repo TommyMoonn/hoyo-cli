@@ -13,7 +13,12 @@ from hoyo_cli.timefmt import format_duration, format_local_timestamp
 
 
 def render_overview(
-    results: Sequence[StatusResult], *, account: str, detailed: bool, now: datetime
+    results: Sequence[StatusResult],
+    *,
+    account: str,
+    detailed: bool,
+    now: datetime,
+    focused: bool = False,
 ) -> RenderableType:
     require_aware(now)
     parts: list[RenderableType] = [
@@ -43,7 +48,7 @@ def render_overview(
                 render_game(
                     result.status,
                     detailed=detailed,
-                    focused=False,
+                    focused=focused,
                     now=now,
                     include_heading=False,
                 )

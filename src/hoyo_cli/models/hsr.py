@@ -1,4 +1,4 @@
-"""Star Rail snapshot contract; upstream mapping is Phase 5 work."""
+"""Immutable Star Rail notes, with reported assignment and reserve state."""
 
 from dataclasses import dataclass, field
 from typing import Literal
@@ -16,4 +16,6 @@ class HSRStatus:
     simulated_universe: CountStatus
     divergent_universe: CountStatus | Literal["Unavailable", "Locked"]
     echo_of_war: CountStatus
+    accepted_assignments: int
+    reserve_full: bool
     game: Literal["hsr"] = field(default="hsr", init=False)

@@ -18,6 +18,7 @@ from hoyo_cli.errors import (
     UnsupportedDataError,
 )
 from hoyo_cli.hoyolab.client import GenshinPyGateway, create_client, request_with_retry
+from hoyo_cli.models.common import GameId
 
 
 @pytest.mark.asyncio
@@ -217,3 +218,56 @@ async def test_pinned_retcode_policy_has_exact_attempt_counts(
     assert session.request.call_count == expected
     assert session.__aexit__.await_count == expected
     assert response.__aexit__.await_count == expected
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "game, method", [("hsr", "get_starrail_notes"), ("zzz", "get_zzz_notes")]
+)
+async def test_phase5_gateway_preserves_selected_uid_and_read_only_options(
+    game: GameId, method: str
+) -> None:
+    captured = datetime(2026, 10, 10, 11, 31, tzinfo=UTC)
+    client = AsyncMock()
+    fetch = getattr(client, method)
+    fetch.return_value = json.loads(
+        (Path(__file__).parent / f"fixtures/{game}_notes.json").read_text()
+    )
+    gateway = GenshinPyGateway(
+        parse_cookie_header("ltuid=123; ltoken=test-secret-123"),
+        client=client,
+        now=lambda: captured,
+    )
+    status = await gateway.fetch_status(game, 222222222)
+    assert status.game == game
+    fetch.assert_awaited_once_with(222222222, autoauth=False, return_raw_data=True)
+    client.update_settings.assert_not_called()
+    client.claim_daily_reward.assert_not_called()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "game, method",
+    [("hsr", "_request_starrail_record"), ("zzz", "_request_zzz_record")],
+)
+async def test_phase5_real_notes_methods_never_enable_settings(
+    game: GameId, method: str
+) -> None:
+    credentials = parse_cookie_header("ltuid=123; ltoken=test-secret-123")
+    client = create_client(credentials)
+    with (
+        patch.object(client, method, new_callable=AsyncMock) as read,
+        patch.object(
+            client, "_get_uid", new_callable=AsyncMock, return_value=222222222
+        ),
+        patch.object(client, "update_settings", new_callable=AsyncMock) as mutate,
+    ):
+        read.side_effect = genshin.errors.DataNotPublic(msg="test-secret-123")
+        from hoyo_cli.errors import AppError
+
+        with pytest.raises(AppError):
+            await GenshinPyGateway(credentials, client=client).fetch_status(
+                game, 222222222
+            )
+    assert read.await_count == 1
+    mutate.assert_not_called()

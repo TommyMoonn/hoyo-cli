@@ -20,6 +20,8 @@ from hoyo_cli.errors import (
     UnsupportedDataError,
 )
 from hoyo_cli.hoyolab.adapters.genshin import normalize_genshin
+from hoyo_cli.hoyolab.adapters.hsr import normalize_hsr
+from hoyo_cli.hoyolab.adapters.zzz import normalize_zzz
 from hoyo_cli.models.common import (
     CheckInReceipt,
     CheckInState,
@@ -159,6 +161,14 @@ class NotesClient(Protocol):
         self, uid: int, *, autoauth: bool, return_raw_data: Literal[True]
     ) -> object: ...
 
+    async def get_starrail_notes(
+        self, uid: int, *, autoauth: bool, return_raw_data: Literal[True]
+    ) -> object: ...
+
+    async def get_zzz_notes(
+        self, uid: int, *, autoauth: bool, return_raw_data: Literal[True]
+    ) -> object: ...
+
 
 class GenshinPyGateway:
     def __init__(
@@ -176,17 +186,20 @@ class GenshinPyGateway:
     async def fetch_status(self, game: GameId, uid: int) -> GameStatus:
         if type(uid) is not int or uid <= 0:
             raise ConfigError("A positive selected game UID is required.")
-        if game != "genshin":
-            raise UnsupportedDataError(
-                "Status mapping for this game is not implemented yet."
-            )
+        if game == "genshin":
+            fetch = self._client.get_genshin_notes
+            normalize = normalize_genshin
+        elif game == "hsr":
+            fetch = self._client.get_starrail_notes
+            normalize = normalize_hsr
+        else:
+            fetch = self._client.get_zzz_notes
+            normalize = normalize_zzz
         data = await request_with_retry(
-            lambda: self._client.get_genshin_notes(
-                uid, autoauth=False, return_raw_data=True
-            ),
+            lambda: fetch(uid, autoauth=False, return_raw_data=True),
             timeout_seconds=REQUEST_TIMEOUT_SECONDS,
         )
-        return normalize_genshin(data, now=self._now())
+        return normalize(data, now=self._now())
 
     async def check_in_state(self, game: GameId, uid: int) -> CheckInState:
         raise UnsupportedDataError("Check-in is not implemented yet.")

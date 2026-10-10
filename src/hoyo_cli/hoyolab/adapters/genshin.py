@@ -8,9 +8,14 @@ from typing import TypeVar, cast
 import genshin
 
 from hoyo_cli.errors import UnsupportedDataError
+from hoyo_cli.hoyolab.adapters.notes import boolean as _boolean
+from hoyo_cli.hoyolab.adapters.notes import integer as _integer
+from hoyo_cli.hoyolab.adapters.notes import mapping as _mapping
+from hoyo_cli.hoyolab.adapters.notes import resource as _resource
+from hoyo_cli.hoyolab.adapters.notes import safe_text as _safe_text
+from hoyo_cli.hoyolab.adapters.notes import seconds as _seconds
 from hoyo_cli.models.common import (
     CountStatus,
-    ResourceStatus,
     TimedActivity,
     require_aware,
 )
@@ -32,51 +37,6 @@ def _optional_detail(
     except (ValueError, TypeError, KeyError, OverflowError):
         # Optional upstream expansions must not hide usable recurring notes.
         return None
-
-
-def _mapping(value: object) -> Mapping[str, object]:
-    if not isinstance(value, Mapping):
-        raise ValueError
-    entries = cast(Mapping[object, object], value)
-    if any(not isinstance(key, str) for key in entries):
-        raise ValueError
-    return cast(Mapping[str, object], entries)
-
-
-def _integer(value: object) -> int:
-    if type(value) is not int or value < 0:
-        raise ValueError
-    return value
-
-
-def _boolean(value: object) -> bool:
-    if not isinstance(value, bool):
-        raise ValueError
-    return value
-
-
-def _seconds(value: object) -> int:
-    if isinstance(value, timedelta):
-        seconds = int(value.total_seconds())
-    elif isinstance(value, str) and value.isascii() and value.isdecimal():
-        seconds = int(value)
-    else:
-        seconds = _integer(value)
-    if seconds < 0:
-        raise ValueError
-    return seconds
-
-
-def _resource(
-    data: Mapping[str, object], current: str, maximum: str, recovery: str, now: datetime
-) -> ResourceStatus:
-    amount, limit = _integer(data[current]), _integer(data[maximum])
-    remaining = _seconds(data[recovery])
-    # A countdown predicts a future deadline, not when an already-full resource filled.
-    full_at = (
-        now + timedelta(seconds=remaining) if amount < limit and remaining > 0 else None
-    )
-    return ResourceStatus(amount, limit, full_at)
 
 
 def _transformer(data: Mapping[str, object], now: datetime) -> TimedActivity:
@@ -137,10 +97,6 @@ def _daily_tasks(value: object) -> DailyTaskStatus | None:
         else (),
         tasks.stored_attendance if tasks.attendance_visible else None,
     )
-
-
-def _safe_text(value: str) -> str:
-    return "".join(char for char in value if char.isprintable())
 
 
 def _quests(value: object) -> QuestStatus | None:

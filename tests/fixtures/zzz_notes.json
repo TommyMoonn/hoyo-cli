@@ -1,0 +1,20 @@
+{
+  "energy": {"progress": {"current": 89, "max": 240}, "restore": 55260},
+  "vitality": {"current": 400, "max": 400},
+  "card_sign": "CardSignDone",
+  "vhs_sale": {"sale_state": "SaleStateDone"},
+  "bounty_commission": {"num": 4, "total": 5, "refresh_time": 86400, "unlock": true},
+  "survey_points": {"num": 600, "total": 800, "is_max_level": false},
+  "weekly_task": {"cur_point": 8000, "max_point": 8000, "refresh_time": 86400},
+  "member_card": {"exp_time": "172800", "is_open": true, "member_card_state": "MemberCardStateACK"},
+  "temple_running": {
+    "level": 12,
+    "current_currency": 1000,
+    "weekly_currency_max": 3000,
+    "currency_next_refresh_ts": "86400",
+    "bench_state": "BenchStateCanProduce",
+    "shelve_state": "ShelveStateSoldOut",
+    "expedition_state": "ExpeditionStateEnd",
+    "auto_work": {"is_auto_work_running": true, "auto_work_ended": false, "left_ts": 3600}
+  }
+}

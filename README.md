@@ -15,8 +15,6 @@ parsing, and offline developer tooling. Phase 2 adds typed config validation,
 safe configuration persistence, and working config inspection and editing.
 Phase 3 adds interactive account setup, HoYoLAB linked-character discovery,
 browser-cookie import, and explicit keyring or plaintext credential storage.
-Status fetching and check-in remain unavailable. Those unfinished commands
-print a concise "not configured yet" error and exit with code `2`.
 Setup makes a read-only linked-account request; no command claims rewards yet.
 
 Phase 4 adds immutable status snapshots, a bounded read-only HoYoLAB gateway,
@@ -26,8 +24,25 @@ The gateway disables automatic notes authorization and uses at most two
 10-second attempts for transient read failures. Authentication and unsupported
 data failures are not retried. Application retry control is isolated against
 the pinned library's internal retries, preserving its per-request session cleanup.
-Status command wiring and HSR/ZZZ mapping remain Phase 5 work; these internal
-Genshin capabilities are not yet exposed through `hoyo status` or game aliases.
+Phase 5 exposes all three games through `hoyo`, `hoyo status`, and the game
+aliases. Enabled games fetch concurrently through one gateway for the selected
+account, and results retain configured order. One failed game keeps its error
+section beside successful games. Status exits `0` if any game succeeds, `1` if
+all fail, `2` for configuration/usage failures, and `3` for missing or invalid
+credentials before requests begin. Status reads never claim rewards or enable
+HoYoLAB notes settings automatically.
+
+Compact views summarize assignments and compound systems; focused views expand
+assignments and ZZZ management states. `--detailed` adds supported timestamps,
+weekly resets, Member Card expiry, and Temple management details. Missing or
+unknown optional systems show `Unavailable`; explicitly locked systems are
+informational. Temple level zero is interpreted as `Locked`. HSR's reserve cap
+is 2,400, from [HoYoWiki](https://wiki.hoyolab.com/pc/hsr/entry/179?lang=en-us),
+because the pinned notes response supplies only the amount and full-state flag.
+
+Cache persistence/fallback remains Phase 6 work. Status currently uses fresh
+responses only. Check-in remains Phase 7 work and returns a concise
+"not configured yet" error with exit code `2`.
 
 ## Prerequisites
 
@@ -68,13 +83,13 @@ path setup instructions and open a new shell.
 
 ## Command grammar
 
-Help, version, account setup, config inspection, and config editing are
-functional. Status and check-in remain planned.
+Help, version, account setup, status, config inspection, and config editing are
+functional. Check-in remains planned.
 
 | Command | Availability and behavior |
 | --- | --- |
-| `hoyo` or `hoyo status` | Planned: overview of all enabled games |
-| `hoyo status <game>` | Planned: focused status for `genshin`, `hsr`, or `zzz` |
+| `hoyo` or `hoyo status` | Available: concurrent overview of all enabled games |
+| `hoyo status <game>` | Available: focused status for `genshin`, `hsr`, or `zzz` |
 | `hoyo genshin`, `hoyo hsr`, `hoyo zzz` | Registered aliases for `hoyo status <game>` |
 | `hoyo check-in [game]` | Planned: explicit daily reward claim |
 | `hoyo init` | Available: interactive account setup or reconfiguration |

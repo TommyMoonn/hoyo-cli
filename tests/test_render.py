@@ -12,7 +12,7 @@ from rich.console import Console
 
 from hoyo_cli.errors import NetworkError
 from hoyo_cli.hoyolab.adapters.genshin import normalize_genshin
-from hoyo_cli.models.common import StatusResult
+from hoyo_cli.models.common import GameStatus, StatusResult
 from hoyo_cli.models.genshin import GenshinStatus
 from hoyo_cli.render.console import make_console
 from hoyo_cli.render.game import render_game
@@ -32,7 +32,7 @@ def status_snapshot() -> GenshinStatus:
 
 
 def render_text(
-    status: GenshinStatus,
+    status: GameStatus,
     width: int = 100,
     *,
     focused: bool = False,
@@ -275,3 +275,67 @@ def test_fresh_overview_footer_and_markup_are_literal(
     assert "Updated 18:31" in output
     assert "[red]main[/red]" in output
     assert output.count("GENSHIN IMPACT") == 1
+
+
+@pytest.mark.parametrize("game", ["hsr", "zzz"])
+@pytest.mark.parametrize("width", [100, 80, 70, 60, 59, 48])
+@pytest.mark.parametrize("mode", ["compact", "focused", "detailed"])
+def test_phase5_game_views(game: str, width: int, mode: str) -> None:
+    from hoyo_cli.hoyolab.adapters.hsr import normalize_hsr
+    from hoyo_cli.hoyolab.adapters.zzz import normalize_zzz
+
+    payload = json.loads(
+        (Path(__file__).parent / f"fixtures/{game}_notes.json").read_text()
+    )
+    status = (normalize_hsr if game == "hsr" else normalize_zzz)(payload, now=NOW)
+    output = render_text(
+        status, width, focused=mode == "focused", detailed=mode == "detailed"
+    )
+    if game == "hsr":
+        for text in (
+            "Trailblaze Power",
+            "211 / 300",
+            "Reserved Power",
+            "842 / 2400",
+            "Daily Training",
+            "Assignments",
+            "Simulated Universe",
+            "Divergent Universe",
+            "Echo of War",
+        ):
+            assert text in output
+        assert ("Test assignment A" in output) == (mode != "compact")
+        if mode == "detailed":
+            assert "Power full at" in output and "Sun 03:25" in output
+            assert "Reserve full" in output and "Not full" in output
+    else:
+        for text in (
+            "Battery Charge",
+            "89 / 240",
+            "Engagement",
+            "Scratch Card",
+            "Video Store",
+            "Hollow Zero",
+            "Weekly Tasks",
+            "Member Card",
+            "Temple",
+        ):
+            assert text in output
+        assert ("Temple Bench" in output) == (mode != "compact")
+        if mode == "detailed":
+            for text in (
+                "Battery full at",
+                "Temple Level",
+                "Temple Currency",
+                "Temple Reset",
+                "Weekly Reset",
+                "Member Card Expiry",
+            ):
+                assert text in output
+        assert (
+            "Bench can produce" in output
+            if mode == "compact"
+            else "Can produce" in output
+        )
+    assert "example.invalid" not in output and "0m" not in output
+    assert all(len(line) <= width for line in output.splitlines())

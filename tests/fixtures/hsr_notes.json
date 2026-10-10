@@ -1,0 +1,22 @@
+{
+  "current_stamina": 211,
+  "max_stamina": 300,
+  "stamina_recover_time": 32040,
+  "current_reserve_stamina": 842,
+  "is_reserve_stamina_full": false,
+  "current_train_score": 500,
+  "max_train_score": 500,
+  "accepted_epedition_num": 2,
+  "total_expedition_num": 4,
+  "expeditions": [
+    {"name": "Test assignment A", "status": "Finished", "remaining_time": 0, "avatars": [], "item_url": "https://example.invalid/item"},
+    {"name": "Test assignment B", "status": "Ongoing", "remaining_time": 8040, "avatars": [], "item_url": "https://example.invalid/item"}
+  ],
+  "current_rogue_score": 14000,
+  "max_rogue_score": 18000,
+  "rogue_tourn_weekly_unlocked": true,
+  "rogue_tourn_weekly_cur": 800,
+  "rogue_tourn_weekly_max": 1000,
+  "weekly_cocoon_cnt": 2,
+  "weekly_cocoon_limit": 3
+}
