@@ -4,6 +4,7 @@ import asyncio
 import io
 import sys
 from collections.abc import Iterator
+from typing import Literal
 from unittest.mock import patch
 
 import click
@@ -63,6 +64,7 @@ async def test_tty_counts_resolved_games_and_clears_display(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["status", "browser_read", "session_verify"])
 @pytest.mark.parametrize(
     "mode", ["stdout", "stderr", "no-color", "env", "config", "ci"]
 )
@@ -70,6 +72,7 @@ async def test_noninteractive_modes_are_silent(
     terminal: io.StringIO,
     monkeypatch: pytest.MonkeyPatch,
     mode: str,
+    operation: Literal["status", "browser_read", "session_verify"],
 ) -> None:
     if mode in ("stdout", "stderr"):
         monkeypatch.setattr(getattr(sys, mode), "isatty", lambda: False)
@@ -78,8 +81,8 @@ async def test_noninteractive_modes_are_silent(
     if mode == "ci":
         monkeypatch.setenv("CI", "true")
     async with progress.OperationProgress(
-        "status",
-        ("genshin",),
+        operation,
+        ("genshin",) if operation == "status" else (),
         no_color=mode == "no-color",
         configured_color="never" if mode == "config" else "always",
         console=Console(file=terminal, force_terminal=True),

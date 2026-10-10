@@ -7,7 +7,13 @@ from unittest.mock import patch
 
 import pytest
 
-from hoyo_cli.auth.browser_import import BrowserCookieAdapter, SystemBrowserImporter
+from hoyo_cli.auth.browser_import import (
+    BrowserProfile,
+    BrowserSession,
+    SystemBrowserImporter,
+    classify_browser_failure,
+)
+from hoyo_cli.auth.browser_worker import load_selected
 from hoyo_cli.auth.credentials import Credentials, open_store, parse_cookie_header
 from hoyo_cli.auth.keyring_backend import KeyringStore
 from hoyo_cli.auth.plaintext_backend import PlaintextStore
@@ -19,8 +25,16 @@ class FakeBrowserAdapter:
         self.denied = denied
         self.calls: list[str] = []
 
+    def list_sessions(self) -> tuple[BrowserSession, ...]:
+        return (BrowserSession("chrome", "Chrome"), BrowserSession("edge", "Edge"))
+
+    def list_profiles(self, source_id: str) -> tuple[BrowserProfile, ...]:
+        return (BrowserProfile(source_id, source_id, "Test profile"),)
+
     def read(self, source_id: str) -> Credentials:
         self.calls.append(source_id)
+        if source_id not in ("chrome", "edge"):
+            raise BrowserImportError("Unsupported browser.")
         if self.denied:
             raise BrowserImportError("Access denied. Paste a Cookie header instead.")
         return parse_cookie_header("ltuid=123; ltoken=test-secret-123")
@@ -28,9 +42,10 @@ class FakeBrowserAdapter:
 
 def test_two_browser_sessions_are_both_listed() -> None:
     adapter = FakeBrowserAdapter()
-    importer = SystemBrowserImporter(adapter, ("chrome", "edge"))
+    importer = SystemBrowserImporter(adapter)
     sessions = importer.list_sessions()
     assert [s.source_id for s in sessions] == ["chrome", "edge"]
+    assert adapter.calls == []
     assert "test-secret-123" not in repr(sessions)
     assert importer.import_session("edge").fields["ltuid"] == "123"
     with pytest.raises(BrowserImportError):
@@ -38,8 +53,10 @@ def test_two_browser_sessions_are_both_listed() -> None:
 
 
 def test_permission_denied_is_recoverable() -> None:
-    importer = SystemBrowserImporter(FakeBrowserAdapter(True), ("chrome", "edge"))
-    assert importer.list_sessions() == ()
+    adapter = FakeBrowserAdapter(True)
+    importer = SystemBrowserImporter(adapter)
+    assert [s.source_id for s in importer.list_sessions()] == ["chrome", "edge"]
+    assert adapter.calls == []
     with pytest.raises(BrowserImportError):
         importer.import_session("edge")
 
@@ -76,13 +93,41 @@ def test_browser_loader_is_scoped_and_cookie_values_never_logged() -> None:
         )
     calls: list[str] = []
 
-    def loader(*, domain_name: str) -> CookieJar:
+    def loader(
+        *, domain_name: str, cookie_file: str | None, key_file: str | None
+    ) -> CookieJar:
         calls.append(domain_name)
+        assert cookie_file is None and key_file is None
         return jar
 
-    credentials = BrowserCookieAdapter({"chrome": loader}).read("chrome")
+    from types import ModuleType
+
+    library = ModuleType("fake_browser_cookie3")
+    library.__dict__["chrome"] = loader
+    with patch(
+        "hoyo_cli.auth.browser_worker.importlib.import_module", return_value=library
+    ):
+        credentials = load_selected("chrome", None, None)
     assert calls == ["hoyolab.com"]
     assert dict(credentials.fields) == {"ltuid": "123", "ltoken": "test-secret-123"}
+
+
+@pytest.mark.parametrize(
+    ("failure", "code", "hint"),
+    [
+        (FileNotFoundError("private-path"), "browser_profile_missing", "profile"),
+        (PermissionError("private-path"), "browser_access_denied", "manual"),
+        (RuntimeError("unexpected-secret"), "browser_unknown", "manual"),
+    ],
+)
+def test_browser_failure_causes_are_safe(
+    failure: Exception, code: str, hint: str
+) -> None:
+    error = classify_browser_failure(failure)
+    assert error.code.value == code
+    assert error.hint and hint in error.hint.lower()
+    assert "private-path" not in str(error)
+    assert "unexpected-secret" not in str(error)
 
 
 class FakeKeyring:

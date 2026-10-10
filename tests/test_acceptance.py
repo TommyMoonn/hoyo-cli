@@ -14,7 +14,7 @@ from click.testing import CliRunner
 from conftest import TEST_COOKIE, TEST_UIDS, AcceptanceEnvironment
 from rich.cells import cell_len
 
-from hoyo_cli.auth.browser_import import BrowserSession
+from hoyo_cli.auth.browser_import import BrowserProfile, BrowserSession
 from hoyo_cli.auth.credentials import parse_cookie_header
 from hoyo_cli.auth.plaintext_backend import PlaintextStore
 from hoyo_cli.cli import main
@@ -422,6 +422,9 @@ def test_commented_config_survives_init(
         acceptance_env.browser.import_session.return_value = parse_cookie_header(
             TEST_COOKIE
         )
+        acceptance_env.browser.list_profiles.return_value = (
+            BrowserProfile("chrome", "chrome", "Library-selected profile"),
+        )
         session_answers = "y\n2\n"
     answers = (
         "y\n" + session_answers + "1\ny\n1\ny\n1\ny\ny\ny\n" + backend_answers + "y\n"
@@ -437,6 +440,7 @@ def test_commented_config_survives_init(
     )
     assert "acceptance-secret-not-real" not in result.output
     if source == "browser":
+        acceptance_env.browser.list_profiles.assert_called_once_with("chrome")
         acceptance_env.browser.import_session.assert_called_once_with("chrome")
     else:
         acceptance_env.browser.list_sessions.assert_not_called()

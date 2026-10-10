@@ -7,7 +7,7 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Protocol, cast
 
-from hoyo_cli.errors import CredentialError
+from hoyo_cli.errors import CredentialError, ErrorCode
 
 # Verified against genshin 1.7.31 CookieManager and utility.fs.
 COOKIE_FIELDS = frozenset(
@@ -49,16 +49,17 @@ class Credentials:
     def __post_init__(self) -> None:
         fields = _validate_fields(self.fields)
         identifiers = [fields[name] for name in _IDENTIFIERS if name in fields]
-        if (
-            not identifiers
-            or any(
-                not value.isascii() or not value.isdecimal() or int(value) <= 0
-                for value in identifiers
-            )
-            or len(set(identifiers)) != 1
+        if not identifiers or any(
+            not value.isascii() or not value.isdecimal() or int(value) <= 0
+            for value in identifiers
         ):
             raise CredentialError(
                 "A consistent positive HoYoLAB account ID is required."
+            )
+        if len(set(identifiers)) != 1:
+            raise CredentialError(
+                "A consistent positive HoYoLAB account ID is required.",
+                code=ErrorCode.CREDENTIALS_CONFLICT,
             )
         legacy = "ltoken" in fields and any(
             name in fields for name in ("ltuid", "account_id")

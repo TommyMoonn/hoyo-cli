@@ -1,5 +1,9 @@
 """Offline linked-role discovery and failure-safe interactive setup."""
 
+import asyncio
+import io as stream_io
+import sys
+import time
 from collections.abc import Callable, Sequence
 from pathlib import Path
 from unittest.mock import patch
@@ -8,8 +12,9 @@ import click
 import genshin
 import pytest
 from click.testing import CliRunner
+from rich.console import Console
 
-from hoyo_cli.auth.browser_import import BrowserSession
+from hoyo_cli.auth.browser_import import BrowserProfile, BrowserSession
 from hoyo_cli.auth.credentials import Credentials, parse_cookie_header
 from hoyo_cli.auth.keyring_backend import KeyringStore
 from hoyo_cli.auth.plaintext_backend import PlaintextStore
@@ -23,10 +28,12 @@ from hoyo_cli.errors import (
     BackendUnavailable,
     BrowserImportError,
     CredentialError,
+    ErrorCode,
 )
 from hoyo_cli.hoyolab.client import fetch_linked_accounts
 from hoyo_cli.hoyolab.discovery import CharacterRef, discover_characters
 from hoyo_cli.models.common import GAME_IDS, GameId
+from hoyo_cli.render import progress
 
 
 class MemoryKeyring:
@@ -200,6 +207,46 @@ def test_browser_read_failure_offers_manual_fallback(tmp_path: Path) -> None:
             FakeDiscovery(),
         )
     assert load_config(tmp_path / "config.toml").default_account == "main"
+
+
+@pytest.mark.parametrize("recovery", ["retry", "manual", "cancel"])
+def test_cli_browser_lock_recovery_is_actionable_and_secret_safe(
+    tmp_path: Path, runner: CliRunner, recovery: str
+) -> None:
+    from hoyo_cli.auth.browser_import import browser_error
+
+    config, secrets = tmp_path / "config.toml", tmp_path / "credentials.toml"
+    browser = FakeBrowser()
+    first_failure = browser_error(ErrorCode.BROWSER_LOCKED)
+    recovered = parse_cookie_header("ltuid=123; ltoken=test-secret-123")
+    recovery_answer = {"retry": "1", "manual": "3", "cancel": "4"}[recovery]
+    answers = "main\ny\n2\n" + recovery_answer + "\n"
+    if recovery == "manual":
+        answers += "ltuid=123; ltoken=test-secret-123\n"
+    if recovery != "cancel":
+        answers += "1\ny\n1\ny\n1\ny\n1\n1\n1\n2\ny\ny\n"
+    with (
+        patch("hoyo_cli.commands.init.config_path", return_value=config),
+        patch("hoyo_cli.commands.init.credentials_path", return_value=secrets),
+        patch("hoyo_cli.commands.init.HoYoLABDiscovery", return_value=FakeDiscovery()),
+        patch("hoyo_cli.commands.init.SystemBrowserImporter", return_value=browser),
+        patch.object(
+            browser, "import_session", side_effect=[first_failure, recovered]
+        ) as read,
+    ):
+        result = runner.invoke(main, ["init", "--no-color"], input=answers)
+    assert result.exit_code == (1 if recovery == "cancel" else 0), result.output
+    assert "database is locked" in result.stderr
+    assert "Close the selected browser fully" in result.stderr
+    assert read.call_count == (2 if recovery == "retry" else 1)
+    assert "test-secret-123" not in result.output
+    assert "Traceback" not in result.output and "\x1b[" not in result.output
+    if recovery == "cancel":
+        assert "Session verified" not in result.output
+        assert not config.exists() and not secrets.exists()
+    else:
+        assert "Session verified" in result.output
+        assert config.exists() and secrets.exists()
 
 
 @pytest.mark.parametrize("stage", ["discover", "no-enabled", "invalid-name"])
@@ -471,6 +518,8 @@ class FakeIO:
             return self.backend
         if prompt == "HoYoLAB session":
             return choices[1] if self.browser else "Paste Cookie header"
+        if prompt == "Browser recovery":
+            return "Paste Cookie header"
         return choices[0]
 
     def confirm(self, prompt: str) -> bool:
@@ -501,6 +550,9 @@ class FakeBrowser:
         self.imported.append(source_id)
         return parse_cookie_header("ltuid=123; ltoken=test-secret-123")
 
+    def list_profiles(self, source_id: str) -> tuple[BrowserProfile, ...]:
+        return (BrowserProfile(source_id, source_id, "Test profile"),)
+
 
 class FakeDiscovery:
     def discover(
@@ -511,6 +563,262 @@ class FakeDiscovery:
             "hsr": (CharacterRef("hsr", 222222222, "test", "Trailblazer"),),
             "zzz": (CharacterRef("zzz", 333333333, "test", "Proxy"),),
         }
+
+
+def test_browser_verification_retry_reuses_extracted_cookies(tmp_path: Path) -> None:
+    class RetryIO(FakeIO):
+        def choose(self, prompt: str, choices: Sequence[str]) -> str:
+            if prompt == "Browser recovery":
+                return "Retry session verification"
+            return super().choose(prompt, choices)
+
+    browser = FakeBrowser()
+    discovery = FakeDiscovery()
+    good = discovery.discover(parse_cookie_header("ltuid=123; ltoken=test-secret-123"))
+    with patch.object(
+        discovery, "discover", side_effect=[AuthenticationError("Expired"), good]
+    ) as verify:
+        run_init(
+            tmp_path / "config.toml",
+            tmp_path / "credentials.toml",
+            RetryIO(browser=True),
+            browser,
+            discovery,
+        )
+    assert browser.imported == ["edge"]
+    assert verify.call_count == 2
+    assert verify.call_args_list[0].args[0] is verify.call_args_list[1].args[0]
+
+
+@pytest.mark.parametrize(
+    "recovery",
+    ["Retry browser import", "Choose another browser/profile", "Paste Cookie header"],
+)
+def test_selected_browser_failure_recovers_without_restarting_account(
+    tmp_path: Path, recovery: str, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from hoyo_cli.auth.browser_import import browser_error
+
+    class RecoveryIO(FakeIO):
+        def choose(self, prompt: str, choices: Sequence[str]) -> str:
+            if prompt == "Browser recovery":
+                return recovery
+            if (
+                prompt == "HoYoLAB session"
+                and recovery == "Choose another browser/profile"
+            ):
+                return choices[0] if len(browser.imported) else choices[1]
+            return super().choose(prompt, choices)
+
+    class FailingBrowser(FakeBrowser):
+        def import_session(self, source_id: str) -> Credentials:
+            self.imported.append(source_id)
+            if len(self.imported) == 1:
+                raise browser_error(ErrorCode.BROWSER_LOCKED)
+            return parse_cookie_header("ltuid=123; ltoken=test-secret-123")
+
+    browser = FailingBrowser()
+    io = RecoveryIO(browser=True)
+    run_init(
+        tmp_path / "config.toml",
+        tmp_path / "credentials.toml",
+        io,
+        browser,
+        FakeDiscovery(),
+    )
+    assert (
+        browser.imported
+        == {
+            "Retry browser import": ["edge", "edge"],
+            "Choose another browser/profile": ["edge", "chrome"],
+            "Paste Cookie header": ["edge"],
+        }[recovery]
+    )
+    assert io.prompts.count("Account name") == 1
+    captured = capsys.readouterr()
+    assert "database is locked" in captured.err
+    assert "Close the selected browser fully" in captured.err
+    assert "Session verified" in captured.out
+    assert "test-secret-123" not in captured.out + captured.err
+    assert "\x1b" not in captured.out + captured.err
+
+
+def test_switch_profile_after_rejected_session_uses_new_credentials(
+    tmp_path: Path,
+) -> None:
+    class ProfilesBrowser(FakeBrowser):
+        def list_sessions(self) -> tuple[BrowserSession, ...]:
+            return (BrowserSession("edge", "Edge", True),)
+
+        def list_profiles(self, source_id: str) -> tuple[BrowserProfile, ...]:
+            return (
+                BrowserProfile("edge:0", "edge", "Personal"),
+                BrowserProfile("edge:1", "edge", "Work"),
+            )
+
+        def import_session(self, source_id: str) -> Credentials:
+            self.imported.append(source_id)
+            token = "rejected-secret" if source_id == "edge:0" else "verified-secret"
+            return parse_cookie_header(f"ltuid=123; ltoken={token}")
+
+    class ProfilesIO(FakeIO):
+        def choose(self, prompt: str, choices: Sequence[str]) -> str:
+            if prompt == "HoYoLAB session":
+                return choices[0]
+            if prompt == "Browser profile":
+                return choices[1] if browser.imported else choices[0]
+            if prompt == "Browser recovery":
+                return "Choose another browser/profile"
+            return super().choose(prompt, choices)
+
+    browser = ProfilesBrowser()
+    discovery = FakeDiscovery()
+    seen: list[Credentials] = []
+
+    def verify(credentials: Credentials) -> dict[GameId, tuple[CharacterRef, ...]]:
+        seen.append(credentials)
+        if credentials.fields["ltoken"] == "rejected-secret":
+            raise AuthenticationError("Session rejected.")
+        return FakeDiscovery().discover(credentials)
+
+    with patch.object(discovery, "discover", side_effect=verify):
+        run_init(
+            tmp_path / "config.toml",
+            tmp_path / "credentials.toml",
+            ProfilesIO(browser=True),
+            browser,
+            discovery,
+        )
+    assert browser.imported == ["edge:0", "edge:1"]
+    assert len(seen) == 2 and seen[0] is not seen[1]
+    stored = PlaintextStore(tmp_path / "credentials.toml").get("main")
+    assert stored and stored.fields["ltoken"] == "verified-secret"
+
+
+@pytest.mark.parametrize("stage", ["read", "verify", "recovery"])
+@pytest.mark.parametrize(
+    "signal", [click.Abort, KeyboardInterrupt, asyncio.CancelledError]
+)
+def test_browser_cancellation_preserves_existing_files(
+    tmp_path: Path, stage: str, signal: type[BaseException]
+) -> None:
+    config, secrets = tmp_path / "config.toml", tmp_path / "credentials.toml"
+    run_init(config, secrets, FakeIO(), FakeBrowser(), FakeDiscovery())
+    before = config.read_bytes(), secrets.read_bytes()
+
+    class CancelIO(FakeIO):
+        def choose(self, prompt: str, choices: Sequence[str]) -> str:
+            if stage == "recovery" and prompt == "Browser recovery":
+                raise signal()
+            return super().choose(prompt, choices)
+
+    browser, discovery = FakeBrowser(), FakeDiscovery()
+    with (
+        patch.object(
+            browser,
+            "import_session",
+            side_effect=signal()
+            if stage == "read"
+            else (BrowserImportError("Read failed") if stage == "recovery" else None),
+            return_value=parse_cookie_header("ltuid=123; ltoken=test-secret-123"),
+        ),
+        patch.object(
+            discovery,
+            "discover",
+            side_effect=signal() if stage == "verify" else None,
+        ),
+        patch("hoyo_cli.commands.init.open_store") as storage,
+    ):
+        with pytest.raises(signal):
+            run_init(config, secrets, CancelIO(browser=True), browser, discovery)
+        storage.assert_not_called()
+    assert (config.read_bytes(), secrets.read_bytes()) == before
+
+
+def test_recovery_cancel_and_declined_save_never_persist_browser_credentials(
+    tmp_path: Path,
+) -> None:
+    class CancelIO(FakeIO):
+        def choose(self, prompt: str, choices: Sequence[str]) -> str:
+            if prompt == "Browser recovery":
+                return "Cancel (no changes)"
+            return super().choose(prompt, choices)
+
+    config, secrets = tmp_path / "config.toml", tmp_path / "credentials.toml"
+    browser = FakeBrowser()
+    with patch.object(
+        browser, "import_session", side_effect=BrowserImportError("Read failed")
+    ):
+        with pytest.raises(click.Abort):
+            run_init(config, secrets, CancelIO(browser=True), browser, FakeDiscovery())
+    assert not config.exists() and not secrets.exists()
+    with pytest.raises(click.Abort):
+        run_init(
+            config,
+            secrets,
+            FakeIO(browser=True, cancel="Save account"),
+            FakeBrowser(),
+            FakeDiscovery(),
+        )
+    assert not config.exists() and not secrets.exists()
+
+
+@pytest.mark.parametrize("width", [48, 70, 100])
+def test_slow_browser_work_shows_stages_and_clears_before_prompts(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    width: int,
+) -> None:
+    monkeypatch.delenv("NO_COLOR", raising=False)
+    monkeypatch.delenv("CI", raising=False)
+    monkeypatch.setenv("TERM", "xterm-256color")
+    monkeypatch.setattr(sys.stdout, "isatty", lambda: True)
+    monkeypatch.setattr(sys.stderr, "isatty", lambda: True)
+    monkeypatch.setattr(progress, "PRESENTATION_DELAY", 0.005)
+    stream = stream_io.StringIO()
+
+    class PromptIO(FakeIO):
+        def check_stopped(self) -> None:
+            text = stream.getvalue()
+            assert text.rfind("\x1b[?25h") >= text.rfind("\x1b[?25l")
+
+        def choose(self, prompt: str, choices: Sequence[str]) -> str:
+            self.check_stopped()
+            return super().choose(prompt, choices)
+
+        def confirm(self, prompt: str) -> bool:
+            self.check_stopped()
+            return super().confirm(prompt)
+
+    class SlowBrowser(FakeBrowser):
+        def import_session(self, source_id: str) -> Credentials:
+            time.sleep(0.03)
+            return super().import_session(source_id)
+
+    class SlowDiscovery(FakeDiscovery):
+        def discover(
+            self, credentials: Credentials
+        ) -> dict[GameId, tuple[CharacterRef, ...]]:
+            time.sleep(0.03)
+            return super().discover(credentials)
+
+    with patch.object(
+        progress,
+        "make_console",
+        return_value=Console(file=stream, force_terminal=True, width=width),
+    ):
+        run_init(
+            tmp_path / "config.toml",
+            tmp_path / "credentials.toml",
+            PromptIO(browser=True),
+            SlowBrowser(),
+            SlowDiscovery(),
+        )
+    output = stream.getvalue()
+    assert "Reading browser cookies" in output
+    assert "Verifying HoYoLAB session" in output
+    assert "games complete" not in output and "%" not in output
+    assert output.endswith("\x1b[2K")
 
 
 def test_initial_setup_one_uid_per_game(

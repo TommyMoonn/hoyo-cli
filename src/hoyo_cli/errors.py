@@ -12,9 +12,20 @@ class ErrorCode(StrEnum):
     CONFIG_INVALID = "config_invalid"
     CREDENTIALS_MISSING = "credentials_missing"
     CREDENTIALS_INVALID = "credentials_invalid"
+    CREDENTIALS_CONFLICT = "credentials_conflict"
     BACKEND_UNAVAILABLE = "backend_unavailable"
     AUTH_REJECTED = "auth_rejected"
     BROWSER_IMPORT = "browser_import"
+    BROWSER_LOCKED = "browser_locked"
+    BROWSER_ACCESS_DENIED = "browser_access_denied"
+    BROWSER_PROFILE_MISSING = "browser_profile_missing"
+    BROWSER_LOGIN_MISSING = "browser_login_missing"
+    BROWSER_COOKIES_CONFLICT = "browser_cookies_conflict"
+    BROWSER_DECRYPTION = "browser_decryption"
+    BROWSER_UNSUPPORTED = "browser_unsupported"
+    BROWSER_STORAGE = "browser_storage"
+    BROWSER_TIMEOUT = "browser_timeout"
+    BROWSER_UNKNOWN = "browser_unknown"
     ALREADY_CHECKED_IN = "already_checked_in"
     VERIFICATION_REQUIRED = "verification_required"
     NETWORK_TIMEOUT = "network_timeout"
@@ -121,14 +132,19 @@ class AmbiguousClaimError(AppError):
 class BrowserImportError(CredentialError):
     """A browser session cannot be read; manual input remains available."""
 
-    def __init__(self, message: str) -> None:
+    def __init__(
+        self,
+        message: str,
+        *,
+        code: ErrorCode = ErrorCode.BROWSER_IMPORT,
+        hint: str | None = (
+            "Retry browser import or paste a full HoYoLAB Cookie header in hoyo init."
+        ),
+    ) -> None:
         super().__init__(
             message,
-            code=ErrorCode.BROWSER_IMPORT,
-            hint=(
-                "Retry browser import or paste a full HoYoLAB Cookie header "
-                "in hoyo init."
-            ),
+            code=code,
+            hint=hint,
         )
 
 

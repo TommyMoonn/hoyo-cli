@@ -1,12 +1,19 @@
 """Interactive setup: validated selection, explicit secrets, recoverable writes."""
 
-from collections.abc import Sequence
+import asyncio
+from collections.abc import Callable, Sequence
+from functools import partial
 from pathlib import Path
-from typing import Protocol, cast
+from typing import Literal, Protocol, TypeVar, cast
 
 import click
 
-from hoyo_cli.auth.browser_import import BrowserImporter, SystemBrowserImporter
+from hoyo_cli.auth.browser_import import (
+    BrowserImporter,
+    BrowserProfile,
+    SystemBrowserImporter,
+    browser_error,
+)
 from hoyo_cli.auth.credentials import (
     Credentials,
     CredentialStore,
@@ -26,12 +33,20 @@ from hoyo_cli.config.repository import commit_config, load_config, prepare_accou
 from hoyo_cli.errors import (
     AppError,
     BackendUnavailable,
-    BrowserImportError,
     ConfigError,
     CredentialError,
+    ErrorCode,
 )
-from hoyo_cli.hoyolab.discovery import CharacterDiscovery, HoYoLABDiscovery
+from hoyo_cli.hoyolab.discovery import (
+    CharacterDiscovery,
+    CharacterRef,
+    HoYoLABDiscovery,
+)
 from hoyo_cli.models.common import GAME_IDS, GameId
+from hoyo_cli.render.errors import format_error
+from hoyo_cli.render.progress import OperationProgress
+
+_Result = TypeVar("_Result")
 
 
 class SetupIO(Protocol):
@@ -87,24 +102,121 @@ def _account_name(io: SetupIO, config: AppConfig | None, requested: str | None) 
     return name
 
 
-def _session(io: SetupIO, browser: BrowserImporter) -> Credentials:
-    if io.confirm("Import a HoYoLAB session from supported browsers?"):
+def _observed_work(
+    operation: Literal["browser_read", "session_verify"],
+    work: Callable[[], _Result],
+    *,
+    no_color: bool,
+    configured_color: str,
+) -> _Result:
+    async def run() -> _Result:
+        async with OperationProgress(
+            operation, no_color=no_color, configured_color=configured_color
+        ):
+            return await asyncio.to_thread(work)
+
+    return asyncio.run(run())
+
+
+def _browser_profile(io: SetupIO, browser: BrowserImporter) -> BrowserProfile | None:
+    sessions = browser.list_sessions()
+    choices = [session.browser_label for session in sessions]
+    if not sessions:
+        click.echo("No supported browser sources are available. Use manual input.")
+        return None
+    selected = _choose(io, "HoYoLAB session", (*choices, "Paste Cookie header"))
+    if selected == "Paste Cookie header":
+        return None
+    session = sessions[choices.index(selected)]
+    profiles = browser.list_profiles(session.source_id)
+    if not profiles:
+        raise browser_error(ErrorCode.BROWSER_PROFILE_MISSING)
+    if not session.supports_profiles:
+        click.echo(
+            "Profile selection is unavailable for this source on this platform. "
+            "The reader selects a profile; manual Cookie header input is available.",
+            color=False,
+        )
+        return profiles[0]
+    # Tokens disambiguate equal profile names without displaying private paths.
+    profile_choices = [f"{p.label} [{p.source_id}]" for p in profiles]
+    selected = _choose(io, "Browser profile", (*profile_choices, "Paste Cookie header"))
+    if selected == "Paste Cookie header":
+        return None
+    return profiles[profile_choices.index(selected)]
+
+
+def _session(
+    io: SetupIO,
+    browser: BrowserImporter,
+    discovery: CharacterDiscovery,
+    *,
+    no_color: bool,
+    configured_color: str,
+) -> tuple[Credentials, dict[GameId, tuple[CharacterRef, ...]]]:
+    use_browser = io.confirm("Import a HoYoLAB session from supported browsers?")
+    profile: BrowserProfile | None = None
+    credentials: Credentials | None = None
+    while use_browser:
         try:
-            sessions = browser.list_sessions()
-            choices = [
-                f"{session.browser_label} [{session.source_id}]" for session in sessions
-            ]
-            selected = _choose(io, "HoYoLAB session", (*choices, "Paste Cookie header"))
-            if selected != "Paste Cookie header":
-                return browser.import_session(
-                    sessions[choices.index(selected)].source_id
+            if profile is None:
+                profile = _browser_profile(io, browser)
+                if profile is None:
+                    break
+            if credentials is None:
+                credentials = _observed_work(
+                    "browser_read",
+                    partial(browser.import_session, profile.source_id),
+                    no_color=no_color,
+                    configured_color=configured_color,
                 )
-        except BrowserImportError:
-            click.echo(
-                "Browser import failed. Manual Cookie header input is available.",
-                color=False,
+                click.echo("Cookies found. Verifying HoYoLAB session.", color=False)
+            discovered = _observed_work(
+                "session_verify",
+                partial(discovery.discover, credentials),
+                no_color=no_color,
+                configured_color=configured_color,
             )
-    return parse_cookie_header(io.secret("Full HoYoLAB Cookie header (hidden)"))
+            click.echo("Session verified.", color=False)
+            return credentials, discovered
+        except ConfigError:
+            raise
+        except AppError as error:
+            # Verification failures retain their classified cause. Unexpected
+            # application exceptions and control signals leave this boundary.
+            if error.code == ErrorCode.UNEXPECTED:
+                raise
+            click.echo(format_error(error), err=True, color=False)
+        retry = (
+            "Retry session verification"
+            if credentials is not None
+            else "Retry browser import"
+        )
+        recovery = _choose(
+            io,
+            "Browser recovery",
+            (
+                retry,
+                "Choose another browser/profile",
+                "Paste Cookie header",
+                "Cancel (no changes)",
+            ),
+        )
+        if recovery == "Cancel (no changes)":
+            raise click.Abort()
+        if recovery == "Paste Cookie header":
+            break
+        if recovery == "Choose another browser/profile":
+            profile, credentials = None, None
+    credentials = parse_cookie_header(io.secret("Full HoYoLAB Cookie header (hidden)"))
+    discovered = _observed_work(
+        "session_verify",
+        lambda: discovery.discover(credentials),
+        no_color=no_color,
+        configured_color=configured_color,
+    )
+    click.echo("Session verified.", color=False)
+    return credentials, discovered
 
 
 def _backend(
@@ -157,14 +269,20 @@ def run_init(
     discovery: CharacterDiscovery,
     *,
     requested_account: str | None = None,
+    no_color: bool = False,
 ) -> None:
     config = load_config(config_file) if config_file.exists() else None
     name = _account_name(io, config, requested_account)
     previous = config.accounts.get(name) if config is not None else None
     if previous is not None and not io.confirm("Replace existing account credentials?"):
         raise click.Abort()
-    credentials = _session(io, browser)
-    discovered = discovery.discover(credentials)
+    credentials, discovered = _session(
+        io,
+        browser,
+        discovery,
+        no_color=no_color,
+        configured_color=config.display_color if config else "auto",
+    )
     if not any(discovered.values()):
         raise ConfigError(
             "No supported linked game characters were found on this HoYoLAB account."
@@ -238,6 +356,7 @@ def configure_account(*, options: CommandOptions) -> None:
             SystemBrowserImporter(),
             HoYoLABDiscovery(),
             requested_account=options.account,
+            no_color=options.no_color,
         )
     except (AppError, click.Abort):
         raise

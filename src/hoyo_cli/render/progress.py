@@ -29,8 +29,8 @@ class OperationProgress:
 
     def __init__(
         self,
-        operation: Literal["status", "check_in"],
-        games: Sequence[GameId],
+        operation: Literal["status", "check_in", "browser_read", "session_verify"],
+        games: Sequence[GameId] = (),
         *,
         no_color: bool = False,
         configured_color: str = "auto",
@@ -48,7 +48,7 @@ class OperationProgress:
             stderr=True,
         )
         self._enabled = (
-            bool(self._games)
+            (bool(self._games) or operation in ("browser_read", "session_verify"))
             and sys.stdout.isatty()
             and sys.stderr.isatty()
             and self._console.is_terminal
@@ -140,6 +140,13 @@ class OperationProgress:
                 self._enabled = False
 
     def _renderable(self) -> Spinner:
+        if self._operation in ("browser_read", "session_verify"):
+            label = (
+                "Reading browser cookies"
+                if self._operation == "browser_read"
+                else "Verifying HoYoLAB session"
+            )
+            return Spinner("dots", text=Text(label))
         label = "Fetching status"
         if self._operation == "check_in":
             active = self._stages.values()
