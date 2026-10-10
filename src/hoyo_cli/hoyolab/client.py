@@ -3,6 +3,7 @@
 import asyncio
 import inspect
 import math
+import ssl
 from collections.abc import Awaitable, Callable, Sequence
 from datetime import UTC, datetime
 from typing import Any, Literal, Protocol, TypeVar, cast
@@ -17,6 +18,7 @@ from hoyo_cli.errors import (
     AppError,
     AuthenticationError,
     ConfigError,
+    ErrorCode,
     NetworkError,
     UnsupportedDataError,
 )
@@ -71,6 +73,22 @@ def create_client(credentials: Credentials) -> genshin.Client:
     return client
 
 
+def _rate_limited() -> NetworkError:
+    return NetworkError(
+        "HoYoLAB rate limited this request.",
+        code=ErrorCode.RATE_LIMITED,
+        hint="Wait before trying again.",
+    )
+
+
+def _server_failed() -> NetworkError:
+    return NetworkError(
+        "HoYoLAB server failed to complete the request.",
+        code=ErrorCode.SERVER_ERROR,
+        hint="Wait for HoYoLAB to recover, then retry.",
+    )
+
+
 def _classify(error: Exception) -> AppError:
     if isinstance(error, AppError):
         return error
@@ -78,29 +96,35 @@ def _classify(error: Exception) -> AppError:
         return AlreadyCheckedInError()
     if isinstance(error, genshin.errors.DailyGeetestTriggered):
         return AppError(
-            "HoYoLAB requires verification; complete check-in on the HoYoLAB website."
+            "HoYoLAB requires verification.",
+            code=ErrorCode.VERIFICATION_REQUIRED,
+            hint="Complete verification and check-in on the HoYoLAB website.",
         )
     if isinstance(error, genshin.errors.InvalidCookies):
-        return AuthenticationError(
-            "HoYoLAB rejected the session. Sign in again and rerun hoyo init."
-        )
+        return AuthenticationError("HoYoLAB rejected the session.")
     if isinstance(error, TimeoutError):
-        return NetworkError("HoYoLAB request timed out.")
+        return NetworkError(
+            "HoYoLAB request timed out.", code=ErrorCode.NETWORK_TIMEOUT
+        )
+    # TLS exceptions also inherit from connection errors. Classify them first.
+    if isinstance(error, (aiohttp.ClientSSLError, ssl.SSLError)):
+        return NetworkError(
+            "Unable to verify the HoYoLAB secure connection.",
+            transient=False,
+            code=ErrorCode.TLS_FAILURE,
+            hint="Check your system clock and trusted certificates, then retry.",
+        )
     if isinstance(error, aiohttp.ClientResponseError):
         if error.status in (401, 403):
             return AuthenticationError(
                 "HoYoLAB rejected authorization for this request."
             )
         if error.status == 429:
-            return NetworkError("HoYoLAB rate limited this request.")
+            return _rate_limited()
         if 500 <= error.status < 600:
-            return NetworkError("HoYoLAB server failed to complete the request.")
+            return _server_failed()
         return UnsupportedDataError(
             "HoYoLAB rejected the request or returned unsupported data."
-        )
-    if isinstance(error, aiohttp.ClientSSLError):
-        return NetworkError(
-            "Unable to verify the HoYoLAB secure connection.", transient=False
         )
     if isinstance(
         error,
@@ -109,16 +133,17 @@ def _classify(error: Exception) -> AppError:
         return NetworkError("Unable to connect to HoYoLAB.")
     if isinstance(error, genshin.errors.GenshinException):
         if error.retcode in (-110, 1028, 10101):
-            return NetworkError("HoYoLAB rate limited this request.")
+            return _rate_limited()
         if error.retcode in (-1, 10307):
-            return NetworkError("HoYoLAB server failed to complete the request.")
+            return _server_failed()
         if error.retcode == 0:
             return UnsupportedDataError(
                 "HoYoLAB returned an unsupported or changed response."
             )
         return AppError(
-            "HoYoLAB could not complete the request. "
-            "Check account access and privacy settings."
+            "HoYoLAB could not complete the request.",
+            code=ErrorCode.API_REJECTED,
+            hint="Check account access and HoYoLAB privacy settings, then retry.",
         )
     if isinstance(
         error,
@@ -127,7 +152,7 @@ def _classify(error: Exception) -> AppError:
         return UnsupportedDataError(
             "HoYoLAB returned an unsupported or changed response."
         )
-    return AppError("HoYoLAB request failed; retry or check account configuration.")
+    return AppError("HoYoLAB request failed.")
 
 
 async def request_with_retry(
@@ -146,11 +171,7 @@ async def _request(
             return await asyncio.wait_for(operation(), timeout=timeout_seconds)
         except Exception as error:
             classified = _classify(error)
-            if (
-                attempt + 1 < attempts
-                and isinstance(classified, NetworkError)
-                and classified.transient
-            ):
+            if attempt + 1 < attempts and classified.retryable:
                 continue
             raise classified from None
     raise AssertionError("Unreachable request state.")
@@ -260,7 +281,17 @@ class GenshinPyGateway:
                 f"{error.message} Check-in may have completed; "
                 "check today's state before trying again.",
                 transient=False,
+                code=error.code,
+                hint="Check today's state on HoYoLAB before trying check-in again.",
             ) from None
+        except AppError as error:
+            if error.code in (ErrorCode.UNEXPECTED, ErrorCode.UNSUPPORTED_DATA):
+                # Preserve the classified error; its recovery must account for
+                # a write that could have completed before the response failed.
+                error.hint = (
+                    "Check today's state on HoYoLAB before trying check-in again."
+                )
+            raise
         return CheckInReceipt()
 
     def _select_check_in_game(self, game: GameId, uid: int) -> genshin.Game:

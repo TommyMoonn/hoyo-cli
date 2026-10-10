@@ -7,6 +7,7 @@ from rich.console import Group, RenderableType
 from rich.text import Text
 
 from hoyo_cli.models.common import StatusResult, require_aware
+from hoyo_cli.render.errors import format_error
 from hoyo_cli.render.game import render_game
 from hoyo_cli.render.styles import GAME_HEADINGS, STYLES
 from hoyo_cli.timefmt import format_duration, format_local_timestamp
@@ -32,7 +33,7 @@ def render_overview(
         if result.error is not None:
             parts.append(
                 Text(
-                    f"Unable to fetch fresh status: {result.error.message}",
+                    format_error(result.error, context="Unable to fetch fresh status"),
                     style=STYLES["error"],
                 )
             )
@@ -44,7 +45,9 @@ def render_overview(
                 )
             )
         if result.cache_error is not None:
-            parts.append(Text(result.cache_error.message, style=STYLES["warning"]))
+            parts.append(
+                Text(format_error(result.cache_error), style=STYLES["warning"])
+            )
         if result.status is not None:
             parts.append(
                 render_game(

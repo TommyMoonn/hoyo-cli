@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import ssl
 from datetime import UTC, datetime
 from pathlib import Path
 from unittest.mock import AsyncMock, Mock, patch
@@ -21,6 +22,121 @@ from hoyo_cli.errors import (
 )
 from hoyo_cli.hoyolab.client import GenshinPyGateway, create_client, request_with_retry
 from hoyo_cli.models.common import GameId
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "failure, code, exit_code, retryable",
+    [
+        (
+            genshin.errors.InvalidCookies(msg="test-secret-123"),
+            "auth_rejected",
+            3,
+            False,
+        ),
+        (TimeoutError("test-secret-123"), "network_timeout", 1, True),
+        (aiohttp.ClientConnectionError("test-secret-123"), "connectivity", 1, True),
+        (ssl.SSLError("test-secret-123"), "tls_failure", 1, False),
+        (
+            aiohttp.ClientSSLError(Mock(), OSError("test-secret-123")),
+            "tls_failure",
+            1,
+            False,
+        ),
+        (genshin.errors.GenshinException({"retcode": -110}), "rate_limited", 1, True),
+        (genshin.errors.GenshinException({"retcode": -1}), "server_error", 1, True),
+        (ValueError("test-secret-123"), "unsupported_data", 1, False),
+        (RuntimeError("test-secret-123"), "unexpected", 1, False),
+    ],
+)
+async def test_safe_failure_contract(
+    failure: Exception, code: str, exit_code: int, retryable: bool
+) -> None:
+    operation = AsyncMock(side_effect=failure)
+    with pytest.raises(AppError) as caught:
+        await request_with_retry(operation, timeout_seconds=1)
+    error = caught.value
+    assert error.code == code
+    assert error.exit_code == exit_code
+    assert error.retryable is retryable
+    assert error.hint
+    assert operation.await_count == (2 if retryable else 1)
+    assert "test-secret-123" not in f"{error.message} {error.hint} {error!r}"
+    assert error.__cause__ is None and error.__suppress_context__
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "http_status, code",
+    [
+        (429, "rate_limited"),
+        (503, "server_error"),
+        (401, "auth_rejected"),
+        (400, "unsupported_data"),
+    ],
+)
+async def test_http_failure_keeps_specific_category(
+    http_status: int, code: str
+) -> None:
+    operation = AsyncMock(
+        side_effect=aiohttp.ClientResponseError(
+            Mock(), (), status=http_status, message="test-secret-123"
+        )
+    )
+    with pytest.raises(AppError) as caught:
+        await request_with_retry(operation, timeout_seconds=1)
+    assert caught.value.code == code
+    assert "test-secret-123" not in f"{caught.value.message} {caught.value.hint}"
+
+
+@pytest.mark.asyncio
+async def test_classified_error_keeps_identity_and_recovery() -> None:
+    error = UnsupportedDataError(
+        "Unsupported notes.", hint="Retry after updating hoyo-cli."
+    )
+    operation = AsyncMock(side_effect=error)
+    with pytest.raises(UnsupportedDataError) as caught:
+        await request_with_retry(operation, timeout_seconds=1)
+    assert caught.value is error
+    assert caught.value.hint == "Retry after updating hoyo-cli."
+    assert not caught.value.retryable
+    operation.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_claim_keeps_failure_category_and_safe_manual_recovery() -> None:
+    client = AsyncMock()
+    client.uids = {}
+    client.claim_daily_reward.side_effect = TimeoutError("test-secret-123")
+    gateway = GenshinPyGateway(
+        parse_cookie_header("ltuid=123; ltoken=test-secret-123"), client=client
+    )
+    with pytest.raises(NetworkError) as caught:
+        await gateway.claim_check_in("hsr", 222222222)
+    assert caught.value.code == "network_timeout"
+    assert not caught.value.retryable
+    assert "today's state" in (caught.value.hint or "")
+    client.claim_daily_reward.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "failure", [RuntimeError("test-secret-123"), ValueError("test-secret-123")]
+)
+async def test_unknown_claim_failure_suggests_state_check_first(
+    failure: Exception,
+) -> None:
+    client = AsyncMock()
+    client.uids = {}
+    client.claim_daily_reward.side_effect = failure
+    gateway = GenshinPyGateway(
+        parse_cookie_header("ltuid=123; ltoken=test-secret-123"), client=client
+    )
+    with pytest.raises(AppError) as caught:
+        await gateway.claim_check_in("zzz", 333333333)
+    assert "today's state" in (caught.value.hint or "")
+    assert not caught.value.retryable
+    client.claim_daily_reward.assert_awaited_once()
 
 
 @pytest.mark.asyncio

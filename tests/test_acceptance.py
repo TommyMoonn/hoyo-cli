@@ -23,6 +23,64 @@ from hoyo_cli.config.repository import load_config, save_account
 from hoyo_cli.hoyolab.discovery import CharacterRef
 from hoyo_cli.models.common import GAME_IDS, GameId
 
+
+@pytest.mark.parametrize("width", [48, 70, 100])
+@pytest.mark.parametrize(
+    "failure, summary, recovery",
+    [
+        (
+            genshin.errors.InvalidCookies(msg="acceptance-secret-not-real"),
+            "rejected",
+            "hoyo init",
+        ),
+        (TimeoutError("acceptance-secret-not-real"), "timed out", "connection"),
+        (ValueError("acceptance-secret-not-real"), "unsupported", "hoyo-cli"),
+        (RuntimeError("acceptance-secret-not-real"), "failed", "Retry"),
+    ],
+)
+def test_partial_result_preserves_safe_cause_and_recovery(
+    runner: CliRunner,
+    acceptance_env: AcceptanceEnvironment,
+    width: int,
+    failure: Exception,
+    summary: str,
+    recovery: str,
+) -> None:
+    acceptance_env.width = width
+    acceptance_env.notes("hsr").side_effect = failure
+    result = runner.invoke(main, ["--no-color"])
+    assert result.exit_code == 0, result.output
+    assert "190 / 200" in result.stdout and "89 / 240" in result.stdout
+    assert "Error:" in result.stdout and "Try:" in result.stdout
+    assert summary in result.stdout and recovery in result.stdout
+    assert not result.stderr
+    assert all(
+        value not in result.output
+        for value in ("acceptance-secret-not-real", "Traceback", "RuntimeError", "\x1b")
+    )
+    assert all(cell_len(line) <= width for line in result.output.splitlines())
+    acceptance_env.client.claim_daily_reward.assert_not_called()
+
+
+def test_check_in_failure_shows_hint_without_erasing_claimed_siblings(
+    runner: CliRunner,
+    acceptance_env: AcceptanceEnvironment,
+) -> None:
+    async def state(*, game: genshin.Game) -> genshin.models.DailyRewardInfo:
+        if game == genshin.Game.STARRAIL:
+            raise genshin.errors.InvalidCookies(msg="acceptance-secret-not-real")
+        return genshin.models.DailyRewardInfo(False, 0)
+
+    acceptance_env.client.get_reward_info.side_effect = state
+    result = runner.invoke(main, ["check-in", "--no-color"])
+    assert result.exit_code == 1
+    assert result.stdout.count("Claimed") == 2
+    assert "Failed" in result.stdout and "Error:" in result.stdout
+    assert "Try:" in result.stdout and "hoyo init" in result.stdout
+    assert "acceptance-secret-not-real" not in result.output
+    assert acceptance_env.client.claim_daily_reward.await_count == 2
+
+
 RESOURCE: dict[GameId, tuple[str, str]] = {
     "genshin": ("Resin", "190 / 200"),
     "hsr": ("Trailblaze Power", "211 / 300"),

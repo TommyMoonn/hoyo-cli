@@ -18,6 +18,102 @@ from hoyo_cli.errors import NetworkError
 from hoyo_cli.models.common import GameId
 
 
+@pytest.mark.parametrize(
+    "arguments", [[], ["status"], ["zzz"], ["check-in"], ["config"]]
+)
+def test_first_run_points_to_setup(
+    runner: CliRunner,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    arguments: list[str],
+) -> None:
+    from hoyo_cli.errors import ConfigError
+
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    with pytest.raises(ConfigError) as caught:
+        load_config(tmp_path / ".hoyo/config.toml")
+    assert caught.value.code == "config_missing"
+    assert not caught.value.retryable
+    result = runner.invoke(main, arguments)
+    assert result.exit_code == 2
+    assert "Error:" in result.stderr and "Run: hoyo init" in result.stderr
+    assert result.stderr.splitlines()[-1] == "Run: hoyo init"
+    assert not result.stdout
+    assert "Traceback" not in result.output and "\x1b" not in result.output
+
+
+def test_missing_credentials_has_specific_category_and_setup_hint(
+    runner: CliRunner,
+    status_gateway: AsyncMock,
+) -> None:
+    from hoyo_cli.commands import CommandOptions, status
+    from hoyo_cli.errors import CredentialError
+
+    with patch.object(status, "open_store") as store:
+        store.return_value.get.return_value = None
+        with pytest.raises(CredentialError) as caught:
+            status.run_status(options=CommandOptions(), game=None)
+        result = runner.invoke(main, [])
+    assert caught.value.code == "credentials_missing"
+    assert not caught.value.retryable
+    assert result.exit_code == 3
+    assert result.stderr.splitlines()[-1] == "Run: hoyo init"
+    status_gateway.fetch_status.assert_not_called()
+
+
+def test_malformed_config_has_repair_hint_and_safe_summary(
+    runner: CliRunner,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from hoyo_cli.errors import ConfigError
+
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    path = tmp_path / ".hoyo/config.toml"
+    path.parent.mkdir()
+    path.write_text('ltoken = "test-secret-123"\n[broken')
+    with pytest.raises(ConfigError) as caught:
+        load_config(path)
+    assert caught.value.code == "config_invalid"
+    assert caught.value.hint and "configuration" in caught.value.hint.lower()
+    result = runner.invoke(main, [])
+    assert result.exit_code == 2
+    assert "Try:" in result.stderr
+    assert "test-secret-123" not in result.output and "Traceback" not in result.output
+
+
+def test_unexpected_command_exception_is_sanitized(runner: CliRunner) -> None:
+    with patch(
+        "hoyo_cli.commands.config.run_config",
+        side_effect=RuntimeError("ltoken=test-secret-123"),
+    ):
+        result = runner.invoke(main, ["config"])
+    assert result.exit_code == 1
+    assert "Error:" in result.stderr and "Try:" in result.stderr
+    assert not result.stdout
+    assert all(
+        value not in result.output
+        for value in ("test-secret-123", "RuntimeError", "Traceback", "\x1b", "locked")
+    )
+
+
+@pytest.mark.parametrize("command", ["status", "check-in"])
+def test_known_boundary_error_uses_same_safe_format(
+    runner: CliRunner,
+    command: str,
+) -> None:
+    from hoyo_cli.errors import AuthenticationError
+
+    error = AuthenticationError("HoYoLAB rejected the session.")
+    handler = "run_status" if command == "status" else "run_check_in"
+    module = command.replace("-", "_")
+    with patch(f"hoyo_cli.commands.{module}.{handler}", side_effect=error):
+        result = runner.invoke(main, [command])
+    assert result.exit_code == 3
+    assert result.stderr.startswith("Error: HoYoLAB rejected the session.\nTry: ")
+    assert "hoyo init" in result.stderr and not result.stdout
+
+
 def test_help_identifies_hoyo(runner: CliRunner) -> None:
     result = runner.invoke(main, ["--help"])
     assert result.exit_code == 0

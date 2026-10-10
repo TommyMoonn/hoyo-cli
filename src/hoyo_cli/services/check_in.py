@@ -26,7 +26,8 @@ async def check_in_games(
                 outcome
                 if isinstance(outcome, AppError)
                 else AppError(
-                    "HoYoLAB check-in failed; check today's state before trying again."
+                    "HoYoLAB check-in failed.",
+                    hint="Check today's state on HoYoLAB before trying check-in again.",
                 )
             )
             return CheckInResult(game, "failed", error=error)

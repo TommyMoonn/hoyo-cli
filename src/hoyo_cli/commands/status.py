@@ -11,7 +11,7 @@ from hoyo_cli.commands import CommandOptions
 from hoyo_cli.config.models import resolve_account, resolve_games
 from hoyo_cli.config.paths import cache_root, config_path, credentials_path
 from hoyo_cli.config.repository import load_config
-from hoyo_cli.errors import AppError, CredentialError
+from hoyo_cli.errors import AppError, CredentialError, ErrorCode
 from hoyo_cli.hoyolab.client import GenshinPyGateway
 from hoyo_cli.models.common import GameId
 from hoyo_cli.render.console import make_console
@@ -29,7 +29,11 @@ def run_status(*, options: CommandOptions, game: GameId | None) -> None:
     games = resolve_games(config, account, game=game, account_name=name)
     credentials = open_store(account.credential_backend, credentials_path()).get(name)
     if credentials is None:
-        raise CredentialError(f"No credentials for account {name}; run hoyo init.")
+        raise CredentialError(
+            f"No credentials for account {name}.",
+            code=ErrorCode.CREDENTIALS_MISSING,
+            hint="Run: hoyo init",
+        )
     try:
         gateway = GenshinPyGateway(credentials)
         results = asyncio.run(
@@ -42,13 +46,15 @@ def run_status(*, options: CommandOptions, game: GameId | None) -> None:
             )
         )
     except asyncio.CancelledError:
-        raise AppError("Status request cancelled.") from None
+        raise AppError(
+            "Status request cancelled.",
+            code=ErrorCode.CANCELLED,
+            hint="Run hoyo status when ready.",
+        ) from None
     except AppError:
         raise
     except Exception:
-        raise AppError(
-            "Unable to fetch status; retry or check account configuration."
-        ) from None
+        raise AppError("Unable to fetch status.") from None
     console = make_console(
         width=None,
         no_color=options.no_color,

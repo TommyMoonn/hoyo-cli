@@ -14,7 +14,7 @@ from tomlkit.items import Item
 from tomlkit.toml_document import TOMLDocument
 
 from hoyo_cli.config.models import AccountConfig, AppConfig, parse_config
-from hoyo_cli.errors import ConfigError
+from hoyo_cli.errors import ConfigError, ErrorCode
 from hoyo_cli.models.common import GAME_IDS, GameId
 
 
@@ -23,11 +23,18 @@ def _read_snapshot(path: Path) -> tuple[TOMLDocument, bytes]:
         original = path.read_bytes()
         return tomlkit.parse(original.decode("utf-8")), original
     except FileNotFoundError:
-        raise ConfigError(f"Configuration file not found.\nConfig: {path}") from None
+        raise ConfigError(
+            f"Configuration file not found.\nConfig: {path}",
+            code=ErrorCode.CONFIG_MISSING,
+            hint="Run: hoyo init",
+        ) from None
     except (ParseError, UnicodeError):
         raise ConfigError(f"Invalid TOML configuration.\nConfig: {path}") from None
     except OSError:
-        raise ConfigError(f"Unable to read configuration.\nConfig: {path}") from None
+        raise ConfigError(
+            f"Unable to read configuration.\nConfig: {path}",
+            hint="Check access to your configuration file, then retry.",
+        ) from None
 
 
 def _read_document(path: Path) -> TOMLDocument:
@@ -38,7 +45,9 @@ def _validate(document: TOMLDocument, path: Path) -> AppConfig:
     try:
         return parse_config(document)
     except ConfigError as error:
-        raise ConfigError(f"{error.message}\nConfig: {path}") from None
+        raise ConfigError(
+            f"{error.message}\nConfig: {path}", code=error.code, hint=error.hint
+        ) from None
 
 
 def load_config(path: Path) -> AppConfig:

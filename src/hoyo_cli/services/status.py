@@ -7,7 +7,7 @@ from pathlib import Path
 
 from hoyo_cli.cache.models import CACHE_VERSION, CacheEntry
 from hoyo_cli.cache.repository import read_eligible, write_cache
-from hoyo_cli.errors import AppError
+from hoyo_cli.errors import AppError, ErrorCode, UnsupportedDataError
 from hoyo_cli.hoyolab.client import HoyolabGateway
 from hoyo_cli.models.common import GameId, StatusResult, require_aware
 
@@ -24,15 +24,14 @@ async def fetch_all_status(
         try:
             snapshot = await gateway.fetch_status(game, uid)
             if snapshot.game != game:
-                raise AppError("HoYoLAB returned status for an unexpected game.")
+                raise UnsupportedDataError(
+                    "HoYoLAB returned status for an unexpected game."
+                )
         except Exception as outcome:
             error = (
                 outcome
                 if isinstance(outcome, AppError)
-                else AppError(
-                    "HoYoLAB status request failed; "
-                    "retry or check account configuration."
-                )
+                else AppError("HoYoLAB status request failed.")
             )
             cached = read_eligible(cache_root, account, game, uid=uid, now=clock())
             if cached is not None:
@@ -51,7 +50,9 @@ async def fetch_all_status(
             )
         except (OSError, ValueError, TypeError, RecursionError, OverflowError):
             cache_error = AppError(
-                "Unable to save status cache; fresh status is still available."
+                "Unable to save status cache; fresh status is still available.",
+                code=ErrorCode.CACHE_WRITE,
+                hint="Check access to the status cache directory, then retry.",
             )
         return StatusResult(game, snapshot, fetched_at, cache_error=cache_error)
 

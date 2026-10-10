@@ -8,6 +8,7 @@ import click
 from hoyo_cli.commands import CommandOptions, check_in, config, init, status
 from hoyo_cli.errors import AppError
 from hoyo_cli.models.common import GAME_IDS, GameId
+from hoyo_cli.render.errors import format_error
 
 _Callback = TypeVar("_Callback", bound=Callable[..., object])
 
@@ -17,7 +18,19 @@ class _ApplicationGroup(click.Group):
         try:
             return super().invoke(ctx)
         except AppError as error:
-            click.echo(f"Error: {error.message}", err=True, color=False)
+            click.echo(format_error(error), err=True, color=False)
+            ctx.exit(error.exit_code)
+        except (click.ClickException, click.Abort, click.exceptions.Exit):
+            raise
+        except Exception:
+            error = AppError(
+                "Command failed.",
+                hint=(
+                    "Review your account configuration. For check-in, check today's "
+                    "state on HoYoLAB before trying again."
+                ),
+            )
+            click.echo(format_error(error), err=True, color=False)
             ctx.exit(error.exit_code)
 
 

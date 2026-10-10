@@ -7,6 +7,7 @@ from rich.table import Table
 from rich.text import Text
 
 from hoyo_cli.models.common import CheckInResult
+from hoyo_cli.render.errors import format_error
 from hoyo_cli.render.styles import GAME_HEADINGS
 
 
@@ -23,11 +24,11 @@ def render_check_in(results: Sequence[CheckInResult], *, account: str) -> Group:
         elif result.outcome == "already_checked_in":
             outcome = Text("Already checked in", style="success")
         else:
-            outcome = Text("Failed: ", style="error")
+            outcome = Text("Failed\n", style="error")
             outcome.append(
-                result.error.message
+                format_error(result.error)
                 if result.error is not None
-                else "Check-in failed.",
+                else "Error: Check-in failed.",
                 style="error",
             )
         table.add_row(name, outcome)
