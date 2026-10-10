@@ -40,8 +40,29 @@ informational. Temple level zero is interpreted as `Locked`. HSR's reserve cap
 is 2,400, from [HoYoWiki](https://wiki.hoyolab.com/pc/hsr/entry/179?lang=en-us),
 because the pinned notes response supplies only the amount and full-state flag.
 
-Cache persistence/fallback remains Phase 6 work. Status currently uses fresh
-responses only. Check-in remains Phase 7 work and returns a concise
+Phase 6 adds validated, atomic per-game cache snapshots in the OS cache directory
+resolved by `platformdirs`. Every status invocation requests fresh data first.
+Each successful game updates its own snapshot immediately. If its request fails,
+that game can display its cached snapshot when it is no more than three hours old,
+including exactly three hours at the moment fallback is evaluated after the
+failed request. Future-dated, corrupt, or incompatible snapshots
+are ignored. Cached resource amounts remain exactly as reported by the API.
+Each fallback section shows the request error and `STALE · fetched <age> ago`;
+`Updated HH:MM` appears only for an entirely fresh result. Status exits `0` when
+any requested game has usable fresh or eligible cached data, and `1` otherwise.
+Cache write failures print a warning while preserving fresh status.
+
+Cache files use `<cache-root>/<account-digest>/<game>.json`. A SHA-256 digest of
+the exact account name keeps paths portable and distinguishes case-sensitive
+account names on Windows. The version 1 JSON envelope includes the original
+account name, game, selected character UID, fetch timestamp, and normalized status;
+it contains no cookies or upstream objects. Fallback requires the cached UID to
+match the currently selected UID. Older snapshots without a verifiable UID are
+ineligible and are replaced by the next successful fresh fetch. Fresh snapshots
+record the time their request completes. Failed requests leave their previous
+cache bytes untouched.
+
+Check-in remains Phase 7 work and returns a concise
 "not configured yet" error with exit code `2`.
 
 ## Prerequisites

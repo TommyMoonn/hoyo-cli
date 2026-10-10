@@ -43,6 +43,8 @@ def render_overview(
                     f"STALE · fetched {format_duration(age)} ago", style=STYLES["stale"]
                 )
             )
+        if result.cache_error is not None:
+            parts.append(Text(result.cache_error.message, style=STYLES["warning"]))
         if result.status is not None:
             parts.append(
                 render_game(

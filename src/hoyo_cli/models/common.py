@@ -83,6 +83,7 @@ class StatusResult:
     fetched_at: datetime | None
     stale: bool = False
     error: AppError | None = None
+    cache_error: AppError | None = None
 
     def __post_init__(self) -> None:
         require_aware(self.fetched_at)

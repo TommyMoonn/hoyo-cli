@@ -1,6 +1,7 @@
 """Behavioral coverage for the installed CLI and command grammar."""
 
-from datetime import UTC, datetime
+import asyncio
+from datetime import UTC, datetime, timedelta
 from importlib.metadata import version
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
@@ -12,7 +13,7 @@ from hoyo_cli.auth.credentials import Credentials, parse_cookie_header
 from hoyo_cli.auth.plaintext_backend import PlaintextStore
 from hoyo_cli.cli import main
 from hoyo_cli.config.models import AccountConfig, GameSelection
-from hoyo_cli.config.repository import save_account
+from hoyo_cli.config.repository import load_config, save_account
 from hoyo_cli.errors import NetworkError
 from hoyo_cli.models.common import GameId
 
@@ -311,7 +312,7 @@ def test_root_and_explicit_overview_render_equivalently(
     assert runner.invoke(main, []).output == runner.invoke(main, ["status"]).output
 
 
-def test_partial_failure_and_all_failed_exits(
+def test_partial_failure_keeps_successful_output(
     runner: CliRunner, status_gateway: AsyncMock
 ) -> None:
     original = status_gateway.fetch_status.side_effect
@@ -329,11 +330,162 @@ def test_partial_failure_and_all_failed_exits(
         and "Battery Charge" in result.output
     )
     assert "timed out" in result.output and "Trailblaze Power" not in result.output
+
+
+def test_all_fail_without_cache_exits_1(
+    runner: CliRunner, status_gateway: AsyncMock
+) -> None:
     status_gateway.fetch_status.side_effect = RuntimeError("test-secret-123")
     failed = runner.invoke(main, [])
     assert failed.exit_code == 1
     assert failed.output.count("Unable to fetch fresh status") == 3
     assert "Traceback" not in failed.output and "test-secret-123" not in failed.output
+
+
+@pytest.mark.parametrize("arguments", [[], ["hsr"], ["status", "hsr", "--detailed"]])
+def test_eligible_stale_only_exits_0(
+    runner: CliRunner, status_gateway: AsyncMock, arguments: list[str]
+) -> None:
+    assert runner.invoke(main, ["hsr"]).exit_code == 0
+    status_gateway.fetch_status.reset_mock()
+    status_gateway.fetch_status.side_effect = NetworkError("HoYoLAB request timed out.")
+    result = runner.invoke(main, arguments)
+    assert result.exit_code == 0, result.output
+    assert "STALE · fetched 0m ago" in result.output
+    assert "211 / 300" in result.output and "timed out" in result.output
+    assert "Updated" not in result.output
+    assert "Traceback" not in result.output and "\x1b[" not in result.output
+    status_gateway.fetch_status.assert_awaited()
+    status_gateway.claim_check_in.assert_not_called()
+
+
+@pytest.mark.parametrize("case", ["corrupt", "expired", "future"])
+def test_unusable_cache_exits_1_without_traceback(
+    runner: CliRunner,
+    status_gateway: AsyncMock,
+    tmp_path: Path,
+    case: str,
+) -> None:
+    import json
+    from datetime import timedelta
+
+    assert runner.invoke(main, ["hsr"]).exit_code == 0
+    path = next((tmp_path / "cache").rglob("*.json"))
+    if case == "corrupt":
+        path.write_text("{broken")
+    else:
+        payload = json.loads(path.read_text())
+        now = datetime(2026, 10, 10, 11, 31, tzinfo=UTC)
+        offset = (
+            timedelta(hours=-3, seconds=-1)
+            if case == "expired"
+            else timedelta(seconds=1)
+        )
+        payload["fetched_at"] = (now + offset).isoformat()
+        path.write_text(json.dumps(payload))
+    status_gateway.fetch_status.side_effect = NetworkError("HoYoLAB request timed out.")
+    result = runner.invoke(main, ["hsr"])
+    assert result.exit_code == 1
+    assert "No eligible cached status available." in result.output
+    assert "timed out" in result.output
+    assert "Trailblaze Power" not in result.output and "STALE" not in result.output
+    assert "Traceback" not in result.output
+
+
+def test_cache_write_failure_keeps_cli_success(
+    runner: CliRunner, status_gateway: AsyncMock
+) -> None:
+    with patch("hoyo_cli.services.status.write_cache", side_effect=PermissionError):
+        result = runner.invoke(main, ["hsr"])
+    assert result.exit_code == 0, result.output
+    assert "211 / 300" in result.output and "Updated" in result.output
+    assert "Unable to save status cache" in result.output
+    assert "Unable to fetch" not in result.output and "STALE" not in result.output
+
+
+@pytest.mark.parametrize("change_uid", [False, True])
+def test_cached_status_requires_current_selected_uid(
+    runner: CliRunner,
+    status_gateway: AsyncMock,
+    tmp_path: Path,
+    change_uid: bool,
+) -> None:
+    assert runner.invoke(main, []).exit_code == 0
+    assert runner.invoke(main, ["--account", "alt"]).exit_code == 0
+    before = {path: path.read_bytes() for path in (tmp_path / "cache").rglob("*.json")}
+    config_file = tmp_path / ".hoyo/config.toml"
+    config = load_config(config_file)
+    account = config.accounts["main"]
+    selected_uid = account.games["genshin"].uid + int(change_uid)
+    save_account(
+        config_file,
+        "main",
+        AccountConfig(
+            account.credential_backend,
+            {**account.games, "genshin": GameSelection(True, selected_uid)},
+        ),
+        make_default=True,
+        game_order=config.game_order,
+    )
+    status_gateway.fetch_status.reset_mock()
+    status_gateway.fetch_status.side_effect = NetworkError("HoYoLAB request timed out.")
+    result = runner.invoke(main, ["genshin"])
+    status_gateway.fetch_status.assert_awaited_once_with("genshin", selected_uid)
+    assert result.exit_code == (1 if change_uid else 0), result.output
+    assert ("STALE" in result.output) == (not change_uid)
+    assert ("190 / 200" in result.output) == (not change_uid)
+    assert "timed out" in result.output and "Traceback" not in result.output
+    assert all(path.read_bytes() == content for path, content in before.items())
+
+
+@pytest.mark.parametrize(
+    "initial_age, elapsed, eligible",
+    [
+        (timedelta(hours=3), timedelta(microseconds=1), False),
+        (timedelta(hours=3, seconds=-1), timedelta(seconds=1), True),
+        (timedelta(hours=2, minutes=59), timedelta(seconds=30), True),
+    ],
+)
+def test_cli_checks_cache_age_after_awaited_failed_request(
+    runner: CliRunner,
+    status_gateway: AsyncMock,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    initial_age: timedelta,
+    elapsed: timedelta,
+    eligible: bool,
+) -> None:
+    import json
+
+    from hoyo_cli.commands import status
+
+    start = datetime(2026, 10, 10, 11, 31, tzinfo=UTC)
+    assert runner.invoke(main, ["genshin"]).exit_code == 0
+    path = next((tmp_path / "cache").rglob("*.json"))
+    payload = json.loads(path.read_text())
+    payload["fetched_at"] = (start - initial_age).isoformat()
+    path.write_text(json.dumps(payload))
+    before = path.read_bytes()
+    current = start
+    monkeypatch.setattr(status, "_now", lambda: current)
+
+    async def delayed_failure(game: GameId, uid: int) -> None:
+        nonlocal current
+        await asyncio.sleep(0)
+        current += elapsed
+        raise NetworkError("HoYoLAB request timed out.")
+
+    status_gateway.fetch_status.side_effect = delayed_failure
+    result = runner.invoke(main, ["genshin"])
+    assert result.exit_code == (0 if eligible else 1), result.output
+    assert ("STALE" in result.output) == eligible
+    assert ("190 / 200" in result.output) == eligible
+    if eligible:
+        assert (
+            "STALE · fetched 3h ago" in result.output or "2h 59m ago" in result.output
+        )
+    assert "timed out" in result.output and "Updated" not in result.output
+    assert path.read_bytes() == before
 
 
 @pytest.mark.parametrize(

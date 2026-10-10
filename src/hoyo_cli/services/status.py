@@ -1,10 +1,12 @@
 """Concurrent status reads with ordered, independent per-game outcomes."""
 
 import asyncio
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from datetime import datetime
 from pathlib import Path
 
+from hoyo_cli.cache.models import CACHE_VERSION, CacheEntry
+from hoyo_cli.cache.repository import read_eligible, write_cache
 from hoyo_cli.errors import AppError
 from hoyo_cli.hoyolab.client import HoyolabGateway
 from hoyo_cli.models.common import GameId, StatusResult, require_aware
@@ -16,22 +18,14 @@ async def fetch_all_status(
     *,
     account: str,
     cache_root: Path,
-    now: datetime,
+    clock: Callable[[], datetime],
 ) -> tuple[StatusResult, ...]:
-    require_aware(now)
-    # Account and cache_root are reserved for Phase 6's per-game fallback.
-    requests = tuple(requested.items())
-    outcomes = await asyncio.gather(
-        *(gateway.fetch_status(game, uid) for game, uid in requests),
-        return_exceptions=True,
-    )
-    results: list[StatusResult] = []
-    for (game, _), outcome in zip(requests, outcomes, strict=True):
-        if isinstance(outcome, asyncio.CancelledError):
-            raise outcome
-        if isinstance(outcome, BaseException):
-            if not isinstance(outcome, Exception):
-                raise outcome
+    async def fetch_one(game: GameId, uid: int) -> StatusResult:
+        try:
+            snapshot = await gateway.fetch_status(game, uid)
+            if snapshot.game != game:
+                raise AppError("HoYoLAB returned status for an unexpected game.")
+        except Exception as outcome:
             error = (
                 outcome
                 if isinstance(outcome, AppError)
@@ -40,16 +34,36 @@ async def fetch_all_status(
                     "retry or check account configuration."
                 )
             )
-            results.append(StatusResult(game, None, None, error=error))
-        elif outcome.game != game:
-            results.append(
-                StatusResult(
-                    game,
-                    None,
-                    None,
-                    error=AppError("HoYoLAB returned status for an unexpected game."),
+            cached = read_eligible(cache_root, account, game, uid=uid, now=clock())
+            if cached is not None:
+                return StatusResult(
+                    game, cached.status, cached.fetched_at, stale=True, error=error
                 )
+            return StatusResult(game, None, None, error=error)
+
+        fetched_at = clock()
+        require_aware(fetched_at)
+        cache_error: AppError | None = None
+        try:
+            write_cache(
+                cache_root,
+                CacheEntry(CACHE_VERSION, account, game, fetched_at, snapshot, uid=uid),
             )
-        else:
-            results.append(StatusResult(game, outcome, now))
+        except (OSError, ValueError, TypeError, RecursionError, OverflowError):
+            cache_error = AppError(
+                "Unable to save status cache; fresh status is still available."
+            )
+        return StatusResult(game, snapshot, fetched_at, cache_error=cache_error)
+
+    outcomes = await asyncio.gather(
+        *(fetch_one(game, uid) for game, uid in requested.items()),
+        return_exceptions=True,
+    )
+    results: list[StatusResult] = []
+    for outcome in outcomes:
+        # Cancellation is a control signal, never a failed request eligible for
+        # fallback. gather also keeps external cancellation cleanup centralized.
+        if isinstance(outcome, BaseException):
+            raise outcome
+        results.append(outcome)
     return tuple(results)

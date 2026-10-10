@@ -10,9 +10,9 @@ from typing import cast
 import pytest
 from rich.console import Console
 
-from hoyo_cli.errors import NetworkError
+from hoyo_cli.errors import AppError, NetworkError
 from hoyo_cli.hoyolab.adapters.genshin import normalize_genshin
-from hoyo_cli.models.common import GameStatus, StatusResult
+from hoyo_cli.models.common import GameId, GameStatus, StatusResult
 from hoyo_cli.models.genshin import GenshinStatus
 from hoyo_cli.render.console import make_console
 from hoyo_cli.render.game import render_game
@@ -339,3 +339,109 @@ def test_phase5_game_views(game: str, width: int, mode: str) -> None:
         )
     assert "example.invalid" not in output and "0m" not in output
     assert all(len(line) <= width for line in output.splitlines())
+
+
+@pytest.mark.parametrize("width", [100, 70, 48])
+def test_stale_age_label_belongs_to_each_game_section(
+    status_snapshot: GenshinStatus, width: int
+) -> None:
+    from hoyo_cli.hoyolab.adapters.hsr import normalize_hsr
+    from hoyo_cli.hoyolab.adapters.zzz import normalize_zzz
+
+    def read(game: str) -> object:
+        return json.loads(
+            (Path(__file__).parent / f"fixtures/{game}_notes.json").read_text()
+        )
+
+    error = NetworkError("Request timed out.")
+    results = (
+        StatusResult("genshin", status_snapshot, NOW),
+        StatusResult(
+            "hsr",
+            normalize_hsr(read("hsr"), now=NOW),
+            NOW - timedelta(minutes=34),
+            stale=True,
+            error=error,
+        ),
+        StatusResult(
+            "zzz",
+            normalize_zzz(read("zzz"), now=NOW),
+            NOW - timedelta(hours=2, minutes=59),
+            stale=True,
+            error=error,
+        ),
+    )
+    output = StringIO()
+    Console(file=output, width=width, color_system=None).print(
+        render_overview(results, account="main", detailed=False, now=NOW)
+    )
+    text = output.getvalue()
+    genshin, other = text.split("HONKAI: STAR RAIL")
+    hsr, zzz = other.split("ZENLESS ZONE ZERO")
+    assert "STALE" not in genshin
+    assert "STALE · fetched 34m ago" in hsr and "211 / 300" in hsr
+    assert "STALE · fetched 2h 59m ago" in zzz and "89 / 240" in zzz
+    assert "Updated" not in text
+    assert all(len(line) <= width for line in text.splitlines())
+
+
+@pytest.mark.parametrize("game", ["genshin", "hsr", "zzz"])
+def test_cached_values_never_increase_over_time(game: GameId) -> None:
+    from hoyo_cli.hoyolab.adapters.genshin import normalize_genshin
+    from hoyo_cli.hoyolab.adapters.hsr import normalize_hsr
+    from hoyo_cli.hoyolab.adapters.zzz import normalize_zzz
+
+    payload: object = json.loads(
+        (Path(__file__).parent / f"fixtures/{game}_notes.json").read_text()
+    )
+    normalize = {
+        "genshin": normalize_genshin,
+        "hsr": normalize_hsr,
+        "zzz": normalize_zzz,
+    }[game]
+    snapshot = normalize(payload, now=NOW)
+    error = NetworkError("Request timed out.")
+    for hours in (1, 2, 3):
+        output = StringIO()
+        Console(file=output, width=100, color_system=None).print(
+            render_overview(
+                (StatusResult(game, snapshot, NOW, stale=True, error=error),),
+                account="main",
+                detailed=True,
+                now=NOW + timedelta(hours=hours),
+            )
+        )
+        text = output.getvalue()
+        expected = {"genshin": "190 / 200", "hsr": "211 / 300", "zzz": "89 / 240"}
+        assert expected[game] in text
+        if game == "genshin":
+            assert "930 / 2400" in text
+        assert f"STALE · fetched {hours}h ago" in text
+        assert "Updated" not in text
+
+
+def test_cache_write_warning_is_distinct_from_fetch_error(
+    status_snapshot: GenshinStatus,
+) -> None:
+    output = StringIO()
+    Console(file=output, width=100, color_system=None).print(
+        render_overview(
+            (
+                StatusResult(
+                    "genshin",
+                    status_snapshot,
+                    NOW,
+                    cache_error=AppError(
+                        "Unable to save status cache; fresh status is still available."
+                    ),
+                ),
+            ),
+            account="main",
+            detailed=False,
+            now=NOW,
+        )
+    )
+    text = output.getvalue()
+    assert "Unable to save status cache" in text
+    assert "Updated 18:31" in text and "190 / 200" in text
+    assert "Unable to fetch" not in text and "STALE" not in text

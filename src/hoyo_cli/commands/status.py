@@ -40,14 +40,13 @@ def run_status(*, options: CommandOptions, game: GameId | None) -> None:
         raise CredentialError(f"No credentials for account {name}; run hoyo init.")
     try:
         gateway = GenshinPyGateway(credentials)
-        captured = _now()
         results = asyncio.run(
             fetch_all_status(
                 gateway,
                 {selected: account.games[selected].uid for selected in games},
                 account=name,
                 cache_root=cache_root(),
-                now=captured,
+                clock=_now,
             )
         )
     except asyncio.CancelledError:
