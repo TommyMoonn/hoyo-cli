@@ -12,9 +12,10 @@ from hoyo_cli.config.paths import config_path, credentials_path
 from hoyo_cli.config.repository import load_config
 from hoyo_cli.errors import AppError, CredentialError, ErrorCode
 from hoyo_cli.hoyolab.client import GenshinPyGateway
-from hoyo_cli.models.common import GameId
+from hoyo_cli.models.common import CheckInResult, GameId
 from hoyo_cli.render.check_in import render_check_in
 from hoyo_cli.render.console import make_console
+from hoyo_cli.render.progress import OperationProgress
 from hoyo_cli.services.check_in import check_in_games
 
 
@@ -30,12 +31,22 @@ def run_check_in(*, options: CommandOptions, game: GameId | None) -> None:
             hint="Run: hoyo init",
         )
     try:
-        results = asyncio.run(
-            check_in_games(
-                GenshinPyGateway(credentials),
-                {selected: account.games[selected].uid for selected in games},
-            )
-        )
+        gateway = GenshinPyGateway(credentials)
+
+        async def claim() -> tuple[CheckInResult, ...]:
+            async with OperationProgress(
+                "check_in",
+                games,
+                no_color=options.no_color,
+                configured_color=config.display_color,
+            ) as progress:
+                return await check_in_games(
+                    gateway,
+                    {selected: account.games[selected].uid for selected in games},
+                    observer=progress.observe,
+                )
+
+        results = asyncio.run(claim())
     except asyncio.CancelledError:
         raise AppError(
             "Check-in cancelled; completed claims remain claimed.",

@@ -14,6 +14,7 @@ from hoyo_cli.cache.repository import read_eligible, write_cache
 from hoyo_cli.errors import NetworkError
 from hoyo_cli.hoyolab.adapters.genshin import normalize_genshin
 from hoyo_cli.models.common import GameId, GameStatus
+from hoyo_cli.models.progress import ProgressEvent
 from hoyo_cli.services.status import fetch_all_status
 
 NOW = datetime(2026, 10, 10, 11, 31, tzinfo=UTC)
@@ -45,6 +46,7 @@ async def test_all_three_fetch_concurrently(tmp_path: Path) -> None:
     hsr_done = asyncio.Event()
     genshin_done = asyncio.Event()
     data = snapshots()
+    observations: list[ProgressEvent] = []
 
     async def fetch(game: GameId, uid: int) -> GameStatus:
         started.append(game)
@@ -69,11 +71,22 @@ async def test_all_three_fetch_concurrently(tmp_path: Path) -> None:
             account="main",
             cache_root=tmp_path,
             clock=lambda: NOW,
+            observer=observations.append,
         ),
         timeout=1,
     )
     assert [r.game for r in results] == ["zzz", "genshin", "hsr"]
     assert completed == ["hsr", "genshin", "zzz"]
+    assert [e.game for e in observations if e.stage == "fetching"] == [
+        "zzz",
+        "genshin",
+        "hsr",
+    ]
+    assert [(e.game, e.outcome) for e in observations if e.stage == "complete"] == [
+        ("hsr", "fresh"),
+        ("genshin", "fresh"),
+        ("zzz", "fresh"),
+    ]
     assert all(
         r.status is not None and r.fetched_at == NOW and not r.stale for r in results
     )
@@ -432,3 +445,77 @@ async def test_fresh_timestamp_is_captured_after_awaited_completion(
     assert result.fetched_at == NOW + timedelta(seconds=20)
     cached = read_eligible(tmp_path, "main", "genshin", uid=2, now=current)
     assert cached is not None and cached.fetched_at == result.fetched_at
+
+
+@pytest.mark.asyncio
+async def test_progress_reports_stale_and_failed_without_error_details(
+    tmp_path: Path,
+) -> None:
+    data = snapshots()
+    write_cache(tmp_path, CacheEntry(1, "main", "hsr", NOW, data["hsr"], uid=2))
+    gateway = AsyncMock()
+    gateway.fetch_status.side_effect = RuntimeError("cookie-secret")
+    events: list[ProgressEvent] = []
+    results = await fetch_all_status(
+        gateway,
+        {"hsr": 2, "zzz": 3},
+        account="main",
+        cache_root=tmp_path,
+        clock=lambda: NOW,
+        observer=events.append,
+    )
+    assert [(e.game, e.outcome) for e in events if e.stage == "complete"] == [
+        ("hsr", "stale"),
+        ("zzz", "failed"),
+    ]
+    assert results[0].stale and results[1].status is None
+    assert "cookie-secret" not in repr(events)
+
+
+@pytest.mark.asyncio
+async def test_status_observer_failure_does_not_change_result(tmp_path: Path) -> None:
+    gateway = AsyncMock()
+    gateway.fetch_status.return_value = snapshots()["genshin"]
+
+    def broken(event: ProgressEvent) -> None:
+        raise RuntimeError("observer-secret")
+
+    (result,) = await fetch_all_status(
+        gateway,
+        {"genshin": 1},
+        account="main",
+        cache_root=tmp_path,
+        clock=lambda: NOW,
+        observer=broken,
+    )
+    assert result.status is not None and result.error is None
+    gateway.fetch_status.assert_awaited_once_with("genshin", 1)
+
+
+@pytest.mark.asyncio
+async def test_status_cancel_does_not_observe_a_resolved_game(tmp_path: Path) -> None:
+    gateway = AsyncMock()
+    entered = asyncio.Event()
+    events: list[ProgressEvent] = []
+
+    async def fetch(game: GameId, uid: int) -> GameStatus:
+        entered.set()
+        await asyncio.Event().wait()
+        raise AssertionError("unreachable")
+
+    gateway.fetch_status.side_effect = fetch
+    task = asyncio.create_task(
+        fetch_all_status(
+            gateway,
+            {"genshin": 1},
+            account="main",
+            cache_root=tmp_path,
+            clock=lambda: NOW,
+            observer=events.append,
+        )
+    )
+    await asyncio.wait_for(entered.wait(), timeout=1)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert events == [ProgressEvent("genshin", "fetching")]

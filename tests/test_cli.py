@@ -16,6 +16,7 @@ from hoyo_cli.config.models import AccountConfig, GameSelection
 from hoyo_cli.config.repository import load_config, save_account
 from hoyo_cli.errors import NetworkError
 from hoyo_cli.models.common import GameId
+from hoyo_cli.models.progress import ProgressEvent
 
 
 @pytest.mark.parametrize(
@@ -827,6 +828,116 @@ def test_checkin_cancelled_operation_exits_cleanly(
     assert result.exit_code == 1, result.output
     assert "cancelled" in result.output
     assert "Traceback" not in result.output
+    check_in_gateway.claim_check_in.assert_not_called()
+
+
+@pytest.mark.parametrize("arguments", [[], ["zzz"], ["check-in"], ["check-in", "hsr"]])
+def test_commands_observe_service_progress_before_final_output(
+    runner: CliRunner,
+    check_in_gateway: AsyncMock,
+    arguments: list[str],
+) -> None:
+    from hoyo_cli.render.progress import OperationProgress
+
+    events: list[ProgressEvent] = []
+    with patch.object(OperationProgress, "observe", side_effect=events.append):
+        result = runner.invoke(main, arguments)
+    assert result.exit_code == 0, result.output
+    total = 1 if arguments in (["zzz"], ["check-in", "hsr"]) else 3
+    assert len([e for e in events if e.stage == "complete"]) == total
+    assert "games complete" not in result.stdout
+    assert result.stderr == ""
+    assert "\x1b" not in result.output and "\r" not in result.output
+    assert "Traceback" not in result.output
+    if arguments and arguments[0] == "check-in":
+        assert check_in_gateway.claim_check_in.await_count == total
+    else:
+        check_in_gateway.claim_check_in.assert_not_called()
+
+
+@pytest.mark.parametrize("arguments", [[], ["zzz"], ["check-in"], ["check-in", "hsr"]])
+@pytest.mark.parametrize("failed", [False, True])
+def test_slow_commands_show_stderr_progress_then_final_results(
+    runner: CliRunner,
+    check_in_gateway: AsyncMock,
+    monkeypatch: pytest.MonkeyPatch,
+    arguments: list[str],
+    failed: bool,
+) -> None:
+    from hoyo_cli.models.common import CheckInState
+    from hoyo_cli.render import progress
+
+    monkeypatch.setenv("TERM", "xterm-256color")
+    monkeypatch.delenv("NO_COLOR", raising=False)
+    monkeypatch.delenv("CI", raising=False)
+    monkeypatch.setattr(progress, "PRESENTATION_DELAY", 0.01)
+    original_fetch = check_in_gateway.fetch_status.side_effect
+    checking = bool(arguments and arguments[0] == "check-in")
+
+    async def fetch(game: GameId, uid: int):
+        await asyncio.sleep(0.03)
+        if failed and game == "zzz":
+            raise RuntimeError("cookie-secret")
+        return await original_fetch(game, uid)
+
+    async def state(game: GameId, uid: int) -> CheckInState:
+        await asyncio.sleep(0.03)
+        if failed and game == "hsr":
+            raise RuntimeError("cookie-secret")
+        return CheckInState(False)
+
+    check_in_gateway.fetch_status.side_effect = fetch
+    check_in_gateway.check_in_state.side_effect = state
+    with patch("click.testing._NamedTextIOWrapper.isatty", return_value=True):
+        result = runner.invoke(main, arguments)
+    expected_failure = failed and (checking or arguments == ["zzz"])
+    assert result.exit_code == int(expected_failure), result.output
+    label = "Checking today's rewards" if checking else "Fetching status"
+    assert label in result.stderr and label not in result.stdout
+    assert "\x1b[?25h" in result.stderr
+    assert result.stderr.endswith("\x1b[2K")
+    assert ("Check-in" if checking else "ZENLESS ZONE ZERO") in result.stdout
+    assert "cookie-secret" not in result.output and "Traceback" not in result.output
+    if checking:
+        total = 1 if len(arguments) == 2 else 3
+        assert check_in_gateway.claim_check_in.await_count == total - int(failed)
+    else:
+        check_in_gateway.claim_check_in.assert_not_called()
+
+
+@pytest.mark.parametrize("arguments", [[], ["check-in"]])
+@pytest.mark.parametrize("signal", [asyncio.CancelledError, KeyboardInterrupt])
+def test_command_cancellation_stops_live_progress_before_error(
+    runner: CliRunner,
+    check_in_gateway: AsyncMock,
+    monkeypatch: pytest.MonkeyPatch,
+    arguments: list[str],
+    signal: type[BaseException],
+) -> None:
+    from hoyo_cli.commands import check_in, status
+    from hoyo_cli.render import progress
+
+    monkeypatch.setenv("TERM", "xterm-256color")
+    monkeypatch.delenv("NO_COLOR", raising=False)
+    monkeypatch.delenv("CI", raising=False)
+    monkeypatch.setattr(progress, "PRESENTATION_DELAY", 0.01)
+
+    async def abort(*args: object, **kwargs: object) -> None:
+        await asyncio.sleep(0.03)
+        raise signal()
+
+    owner, method = (
+        (check_in, "check_in_games") if arguments else (status, "fetch_all_status")
+    )
+    monkeypatch.setattr(owner, method, abort)
+    with patch("click.testing._NamedTextIOWrapper.isatty", return_value=True):
+        result = runner.invoke(main, arguments)
+    assert result.exit_code == 1
+    assert "\x1b[?25h" in result.stderr
+    assert result.stderr.rfind("\x1b[2K") < result.stderr.index(
+        "cancelled" if signal is asyncio.CancelledError else "Aborted!"
+    )
+    assert result.stdout == "" and "Traceback" not in result.stderr
     check_in_gateway.claim_check_in.assert_not_called()
 
 

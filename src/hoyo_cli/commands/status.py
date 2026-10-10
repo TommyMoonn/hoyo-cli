@@ -13,9 +13,10 @@ from hoyo_cli.config.paths import cache_root, config_path, credentials_path
 from hoyo_cli.config.repository import load_config
 from hoyo_cli.errors import AppError, CredentialError, ErrorCode
 from hoyo_cli.hoyolab.client import GenshinPyGateway
-from hoyo_cli.models.common import GameId
+from hoyo_cli.models.common import GameId, StatusResult
 from hoyo_cli.render.console import make_console
 from hoyo_cli.render.overview import render_overview
+from hoyo_cli.render.progress import OperationProgress
 from hoyo_cli.services.status import fetch_all_status
 
 
@@ -36,15 +37,24 @@ def run_status(*, options: CommandOptions, game: GameId | None) -> None:
         )
     try:
         gateway = GenshinPyGateway(credentials)
-        results = asyncio.run(
-            fetch_all_status(
-                gateway,
-                {selected: account.games[selected].uid for selected in games},
-                account=name,
-                cache_root=cache_root(),
-                clock=_now,
-            )
-        )
+
+        async def fetch() -> tuple[StatusResult, ...]:
+            async with OperationProgress(
+                "status",
+                games,
+                no_color=options.no_color,
+                configured_color=config.display_color,
+            ) as progress:
+                return await fetch_all_status(
+                    gateway,
+                    {selected: account.games[selected].uid for selected in games},
+                    account=name,
+                    cache_root=cache_root(),
+                    clock=_now,
+                    observer=progress.observe,
+                )
+
+        results = asyncio.run(fetch())
     except asyncio.CancelledError:
         raise AppError(
             "Status request cancelled.",

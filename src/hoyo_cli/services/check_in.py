@@ -6,16 +6,27 @@ from collections.abc import Mapping
 from hoyo_cli.errors import AlreadyCheckedInError, AppError
 from hoyo_cli.hoyolab.client import HoyolabGateway
 from hoyo_cli.models.common import CheckInResult, GameId
+from hoyo_cli.models.progress import ProgressEvent, ProgressObserver, notify_progress
 
 
 async def check_in_games(
-    gateway: HoyolabGateway, requested: Mapping[GameId, int]
+    gateway: HoyolabGateway,
+    requested: Mapping[GameId, int],
+    *,
+    observer: ProgressObserver | None = None,
 ) -> tuple[CheckInResult, ...]:
     async def check_one(game: GameId, uid: int) -> CheckInResult:
+        notify_progress(observer, ProgressEvent(game, "checking"))
+        result = await check_result(game, uid)
+        notify_progress(observer, ProgressEvent(game, "complete", result.outcome))
+        return result
+
+    async def check_result(game: GameId, uid: int) -> CheckInResult:
         try:
             state = await gateway.check_in_state(game, uid)
             if state.already_checked_in:
                 return CheckInResult(game, "already_checked_in")
+            notify_progress(observer, ProgressEvent(game, "claiming"))
             receipt = await gateway.claim_check_in(game, uid)
             return CheckInResult(game, "claimed", reward=receipt.reward)
         except AlreadyCheckedInError:

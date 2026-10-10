@@ -12,6 +12,7 @@ from hoyo_cli.errors import (
     NetworkError,
 )
 from hoyo_cli.models.common import CheckInReceipt, CheckInState, GameId
+from hoyo_cli.models.progress import ProgressEvent
 from hoyo_cli.services.check_in import check_in_games
 
 
@@ -112,6 +113,7 @@ async def test_read_finishes_before_claim_and_result_order_is_stable() -> None:
     entered: set[GameId] = set()
     release = asyncio.Event()
     events: list[tuple[str, GameId]] = []
+    observed: list[ProgressEvent] = []
 
     async def state(game: GameId, uid: int) -> CheckInState:
         entered.add(game)
@@ -130,12 +132,34 @@ async def test_read_finishes_before_claim_and_result_order_is_stable() -> None:
     gateway.claim_check_in.side_effect = claim
     results = await asyncio.wait_for(
         check_in_games(
-            gateway, {"zzz": 333333333, "hsr": 222222222, "genshin": 111111111}
+            gateway,
+            {"zzz": 333333333, "hsr": 222222222, "genshin": 111111111},
+            observer=observed.append,
         ),
         timeout=1,
     )
     assert [result.game for result in results] == ["zzz", "hsr", "genshin"]
     assert all(result.outcome == "claimed" for result in results)
+    for game in ("genshin", "hsr", "zzz"):
+        assert [e.stage for e in observed if e.game == game] == [
+            "checking",
+            "claiming",
+            "complete",
+        ]
+
+
+@pytest.mark.asyncio
+async def test_failed_preflight_observes_no_claim_stage() -> None:
+    gateway = AsyncMock()
+    gateway.check_in_state.side_effect = NetworkError("Request timed out.")
+    observed: list[ProgressEvent] = []
+    (result,) = await check_in_games(gateway, {"zzz": 3}, observer=observed.append)
+    assert result.outcome == "failed"
+    assert observed == [
+        ProgressEvent("zzz", "checking"),
+        ProgressEvent("zzz", "complete", "failed"),
+    ]
+    gateway.claim_check_in.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -165,3 +189,77 @@ async def test_cancellation_cleans_up_children_without_claim_or_retry() -> None:
     assert set(cleaned) == {"hsr", "zzz"}
     assert gateway.check_in_state.await_count == 2
     gateway.claim_check_in.assert_not_called()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("outcome", ["claimed", "already_checked_in", "failed"])
+async def test_check_in_progress_tracks_real_stages(outcome: str) -> None:
+    gateway = AsyncMock()
+    gateway.check_in_state.return_value = CheckInState(outcome == "already_checked_in")
+    gateway.claim_check_in.return_value = CheckInReceipt("safe reward")
+    if outcome == "failed":
+        gateway.claim_check_in.side_effect = RuntimeError("cookie-secret")
+    events: list[ProgressEvent] = []
+    (result,) = await check_in_games(gateway, {"zzz": 3}, observer=events.append)
+    assert result.outcome == outcome
+    expected = [ProgressEvent("zzz", "checking")]
+    if outcome != "already_checked_in":
+        expected.append(ProgressEvent("zzz", "claiming"))
+    expected.append(ProgressEvent("zzz", "complete", result.outcome))
+    assert events == expected
+    assert "cookie-secret" not in repr(events) and "safe reward" not in repr(events)
+    assert gateway.claim_check_in.await_count == (outcome != "already_checked_in")
+
+
+@pytest.mark.asyncio
+async def test_check_in_observer_failure_does_not_repeat_claim() -> None:
+    gateway = AsyncMock()
+    gateway.check_in_state.return_value = CheckInState(False)
+    gateway.claim_check_in.return_value = CheckInReceipt()
+
+    def broken(event: ProgressEvent) -> None:
+        raise ValueError("observer-secret")
+
+    (result,) = await check_in_games(gateway, {"hsr": 2}, observer=broken)
+    assert result.outcome == "claimed"
+    gateway.claim_check_in.assert_awaited_once_with("hsr", 2)
+
+
+@pytest.mark.asyncio
+async def test_check_in_progress_order_and_claim_cancellation() -> None:
+    gateway = AsyncMock()
+    entered = asyncio.Event()
+    cleaned = asyncio.Event()
+    events: list[ProgressEvent] = []
+    gateway.check_in_state.return_value = CheckInState(False)
+
+    async def claim(game: GameId, uid: int) -> CheckInReceipt:
+        if game == "zzz":
+            await entered.wait()
+            return CheckInReceipt()
+        entered.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            cleaned.set()
+        raise AssertionError("unreachable")
+
+    gateway.claim_check_in.side_effect = claim
+
+    def observe(event: ProgressEvent) -> None:
+        events.append(event)
+        if event == ProgressEvent("zzz", "complete", "claimed"):
+            task.cancel()
+
+    task = asyncio.create_task(
+        check_in_games(
+            gateway,
+            {"hsr": 2, "zzz": 3},
+            observer=observe,
+        )
+    )
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(task, timeout=1)
+    assert cleaned.is_set()
+    assert [e.game for e in events if e.stage == "complete"] == ["zzz"]
+    assert gateway.claim_check_in.await_count == 2

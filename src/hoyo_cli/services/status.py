@@ -10,6 +10,7 @@ from hoyo_cli.cache.repository import read_eligible, write_cache
 from hoyo_cli.errors import AppError, ErrorCode, UnsupportedDataError
 from hoyo_cli.hoyolab.client import HoyolabGateway
 from hoyo_cli.models.common import GameId, StatusResult, require_aware
+from hoyo_cli.models.progress import ProgressEvent, ProgressObserver, notify_progress
 
 
 async def fetch_all_status(
@@ -19,8 +20,22 @@ async def fetch_all_status(
     account: str,
     cache_root: Path,
     clock: Callable[[], datetime],
+    observer: ProgressObserver | None = None,
 ) -> tuple[StatusResult, ...]:
     async def fetch_one(game: GameId, uid: int) -> StatusResult:
+        notify_progress(observer, ProgressEvent(game, "fetching"))
+        result = await fetch_result(game, uid)
+        outcome = (
+            "stale"
+            if result.stale
+            else "fresh"
+            if result.status is not None
+            else "failed"
+        )
+        notify_progress(observer, ProgressEvent(game, "complete", outcome))
+        return result
+
+    async def fetch_result(game: GameId, uid: int) -> StatusResult:
         try:
             snapshot = await gateway.fetch_status(game, uid)
             if snapshot.game != game:
