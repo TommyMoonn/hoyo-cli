@@ -27,19 +27,48 @@ class _Row:
     label: str
     primary: str
     secondary: str = ""
+    primary_style: str = "text"
+    secondary_style: str = "muted"
 
 
-def _recovery(resource: ResourceStatus, now: datetime) -> str:
+def _state_style(state: str) -> str:
+    if state in (
+        "Ready",
+        "Finished",
+        "Not done",
+        "Revenue available",
+        "Waiting to open",
+        "Can produce",
+        "Can stock",
+        "Sold out",
+        "Can dispatch",
+        "Expedition complete",
+    ):
+        return "attention"
+    if state in ("Done", "Claimed", "Complete", "Inactive"):
+        return "complete"
+    if state in ("Unavailable", "Locked"):
+        return "muted"
+    return "text"
+
+
+def _state_text(state: str) -> str:
+    return "Data unavailable" if state == "Unavailable" else state
+
+
+def _recovery(resource: ResourceStatus, now: datetime, stale: bool) -> str:
     if resource.current >= resource.maximum:
         return "Full"
+    if stale and resource.full_at is not None:
+        return f"Snapshot estimate · {format_local_timestamp(resource.full_at, now)}"
     if resource.full_at is not None and resource.full_at <= now:
         return "Recovery time elapsed"
-    return format_full_at(resource.full_at, now)
+    return _state_text(format_full_at(resource.full_at, now))
 
 
 def _activity(activity: TimedActivity, now: datetime) -> str:
     if activity.state in ("Ready", "Finished", "Locked", "Unavailable"):
-        return activity.state
+        return _state_text(activity.state)
     if activity.completes_at is None:
         return activity.state
     seconds = int((activity.completes_at - now).total_seconds())
@@ -47,20 +76,17 @@ def _activity(activity: TimedActivity, now: datetime) -> str:
 
 
 def _genshin_rows(
-    status: GenshinStatus, detailed: bool, focused: bool, now: datetime
+    status: GenshinStatus, detailed: bool, focused: bool, now: datetime, stale: bool
 ) -> list[_Row]:
     resin = status.resin
-    rows = [_Row("Resin", f"{resin.current} / {resin.maximum}", _recovery(resin, now))]
+    rows = [_resource_row("Resin", resin, now, stale)]
     realm = status.realm_currency
     finished = sum(activity.state == "Finished" for activity in status.expeditions)
+    commission_style = "complete" if status.commission_reward_claimed else "attention"
     rows.append(
-        _Row("Realm Currency", "Unavailable")
+        _Row("Realm Currency", "Data unavailable")
         if realm is None
-        else _Row(
-            "Realm Currency",
-            f"{realm.current} / {realm.maximum}",
-            _recovery(realm, now),
-        )
+        else _resource_row("Realm Currency", realm, now, stale)
     )
     rows.extend(
         [
@@ -70,13 +96,20 @@ def _genshin_rows(
                 "Reward claimed"
                 if status.commission_reward_claimed
                 else "Reward unclaimed",
+                primary_style=commission_style,
+                secondary_style=commission_style,
             ),
             _Row(
                 "Expeditions",
                 f"{len(status.expeditions)} / {status.max_expeditions}",
                 f"{finished} finished",
+                secondary_style="attention" if finished else "muted",
             ),
-            _Row("Transformer", _activity(status.transformer, now)),
+            _Row(
+                "Transformer",
+                _activity(status.transformer, now),
+                primary_style=_state_style(status.transformer.state),
+            ),
             _Row(
                 "Weekly Discounts",
                 f"{status.weekly_discounts.current} / "
@@ -86,21 +119,13 @@ def _genshin_rows(
         ]
     )
     if focused or detailed:
-        for activity in status.expeditions:
-            rows.append(_Row(activity.label, _activity(activity, now)))
-            if detailed and activity.completes_at is not None:
-                rows.append(
-                    _Row(
-                        f"{activity.label} at",
-                        format_local_timestamp(activity.completes_at, now),
-                    )
-                )
+        rows.extend(_activity_rows(status.expeditions, detailed, now))
     if detailed:
-        if resin.full_at is not None:
+        if not stale and resin.full_at is not None:
             rows.append(
                 _Row("Resin full at", format_local_timestamp(resin.full_at, now))
             )
-        if realm is not None and realm.full_at is not None:
+        if not stale and realm is not None and realm.full_at is not None:
             rows.append(
                 _Row("Realm full at", format_local_timestamp(realm.full_at, now))
             )
@@ -113,11 +138,9 @@ def _genshin_rows(
             )
         tasks = status.daily_tasks
         if tasks is not None:
-            rows.append(
-                _Row("Daily Tasks", f"{tasks.tasks.current} / {tasks.tasks.maximum}")
-            )
+            rows.append(_progress_row("Daily Tasks", tasks.tasks))
             rows.extend(
-                _Row(f"Task Reward {index}", state)
+                _Row(f"Task Reward {index}", state, primary_style=_state_style(state))
                 for index, state in enumerate(tasks.reward_states, 1)
             )
             rows.extend(
@@ -148,11 +171,31 @@ def _genshin_rows(
 
 
 def _count(value: CountStatus | None) -> str:
-    return f"{value.current} / {value.maximum}" if value is not None else "Unavailable"
+    return (
+        f"{value.current} / {value.maximum}"
+        if value is not None
+        else "Data unavailable"
+    )
 
 
-def _resource_row(label: str, value: ResourceStatus, now: datetime) -> _Row:
-    return _Row(label, _count(value), _recovery(value, now))
+def _resource_row(
+    label: str, value: ResourceStatus, now: datetime, stale: bool
+) -> _Row:
+    style = "attention" if value.current >= value.maximum and not stale else "text"
+    return _Row(
+        label,
+        _count(value),
+        _recovery(value, now, stale),
+        primary_style=style,
+        secondary_style=style if style == "attention" else "muted",
+    )
+
+
+def _progress_row(label: str, value: CountStatus | None) -> _Row:
+    complete = (
+        value is not None and value.maximum > 0 and value.current >= value.maximum
+    )
+    return _Row(label, _count(value), primary_style="complete" if complete else "text")
 
 
 def _activity_rows(
@@ -164,7 +207,13 @@ def _activity_rows(
         if activity.state == "Running" and activity.completes_at is not None:
             rows.append(_Row(activity.label, activity.state, _activity(activity, now)))
         else:
-            rows.append(_Row(activity.label, _activity(activity, now)))
+            rows.append(
+                _Row(
+                    activity.label,
+                    _activity(activity, now),
+                    primary_style=_state_style(activity.state),
+                )
+            )
         if detailed and activity.completes_at is not None:
             rows.append(
                 _Row(
@@ -176,26 +225,31 @@ def _activity_rows(
 
 
 def _hsr_rows(
-    status: HSRStatus, detailed: bool, focused: bool, now: datetime
+    status: HSRStatus, detailed: bool, focused: bool, now: datetime, stale: bool
 ) -> list[_Row]:
     du = status.divergent_universe
+    finished = sum(a.state == "Finished" for a in status.assignments)
     rows = [
-        _resource_row("Trailblaze Power", status.power, now),
+        _resource_row("Trailblaze Power", status.power, now, stale),
         _Row("Reserved Power", _count(status.reserved_power)),
-        _Row("Daily Training", _count(status.daily_training)),
+        _progress_row("Daily Training", status.daily_training),
         _Row(
             "Assignments",
             f"{status.accepted_assignments} / {status.max_assignments}",
-            f"{sum(a.state == 'Finished' for a in status.assignments)} finished",
+            f"{finished} finished",
+            secondary_style="attention" if finished else "muted",
         ),
-        _Row("Simulated Universe", _count(status.simulated_universe)),
-        _Row("Divergent Universe", _count(du) if isinstance(du, CountStatus) else du),
+        _progress_row("Simulated Universe", status.simulated_universe),
+        _Row(
+            "Divergent Universe",
+            _count(du) if isinstance(du, CountStatus) else _state_text(du),
+        ),
         _Row("Echo of War", _count(status.echo_of_war), "remaining"),
     ]
     if focused or detailed:
         rows.extend(_activity_rows(status.assignments, detailed, now))
     if detailed:
-        if status.power.full_at is not None:
+        if not stale and status.power.full_at is not None:
             rows.append(
                 _Row("Power full at", format_local_timestamp(status.power.full_at, now))
             )
@@ -204,34 +258,70 @@ def _hsr_rows(
 
 
 def _zzz_rows(
-    status: ZZZStatus, detailed: bool, focused: bool, now: datetime
+    status: ZZZStatus, detailed: bool, focused: bool, now: datetime, stale: bool
 ) -> list[_Row]:
     bounty = (
         _count(status.hollow_zero_bounties)
         if status.bounties_state == "Available"
-        else status.bounties_state
+        else _state_text(status.bounties_state)
     )
     points = _count(status.hollow_zero_points)
+    if focused or detailed:
+        hollow_rows = [
+            _Row("Hollow Zero Bounties", bounty),
+            _Row("Hollow Zero Investigation", points),
+        ]
+    elif status.hollow_zero_bounties is not None or status.bounties_state == "Locked":
+        hollow_rows = (
+            [_Row("Hollow Zero", bounty)]
+            if status.hollow_zero_points is None
+            else [_Row("Hollow Zero", f"Bounties {bounty}", f"Investigation {points}")]
+        )
+    else:
+        hollow_rows = [
+            _Row(
+                "Hollow Zero",
+                "Data unavailable"
+                if status.hollow_zero_points is None
+                else f"Investigation {points}",
+            )
+        ]
     temple = status.temple
     if isinstance(temple, TempleStatus):
-        summary = temple.expedition.state
-        secondary = f"Bench {temple.bench.state.lower()}"
+        summary = _state_text(temple.expedition.state)
+        secondary = f"Bench {_state_text(temple.bench.state).lower()}"
     else:
-        summary, secondary = temple, ""
+        summary, secondary = _state_text(temple), ""
     rows = [
-        _resource_row("Battery Charge", status.battery, now),
-        _Row("Engagement", _count(status.engagement)),
-        _Row("Scratch Card", status.scratch_card),
-        _Row("Video Store", status.video_store),
-        _Row("Hollow Zero", f"Bounties {bounty}", f"Investigation {points}"),
-        _Row("Weekly Tasks", _count(status.weekly_tasks)),
-        _Row("Member Card", status.member_card.state),
-        _Row("Temple", summary, secondary),
+        _resource_row("Battery Charge", status.battery, now, stale),
+        _progress_row("Engagement", status.engagement),
+        _Row(
+            "Scratch Card",
+            _state_text(status.scratch_card),
+            primary_style=_state_style(status.scratch_card),
+        ),
+        _Row(
+            "Video Store",
+            _state_text(status.video_store),
+            primary_style=_state_style(status.video_store),
+        ),
+        *hollow_rows,
+        _progress_row("Weekly Tasks", status.weekly_tasks),
+        _Row(
+            "Member Card",
+            _state_text(status.member_card.state),
+            primary_style=_state_style(status.member_card.state),
+        ),
+        _Row(
+            "Temple",
+            summary,
+            secondary,
+            primary_style=_state_style(
+                temple.expedition.state if isinstance(temple, TempleStatus) else temple
+            ),
+        ),
     ]
     if focused or detailed:
-        rows.extend(
-            [_Row("Hollow Zero Bounties", bounty), _Row("Hollow Zero Points", points)]
-        )
         if isinstance(temple, TempleStatus):
             activities = (temple.bench, temple.shelves, temple.expedition)
             if temple.auto_work is not None:
@@ -239,7 +329,7 @@ def _zzz_rows(
             rows.extend(_activity_rows(activities, detailed, now))
     if detailed:
         for label, timestamp in (
-            ("Battery full at", status.battery.full_at),
+            ("Battery full at", None if stale else status.battery.full_at),
             ("Hollow Zero Reset", status.bounties_reset_at),
             ("Weekly Reset", status.weekly_reset_at),
             ("Member Card Expiry", status.member_card.completes_at),
@@ -257,13 +347,13 @@ def _zzz_rows(
 
 
 def _rows(
-    status: GameStatus, detailed: bool, focused: bool, now: datetime
+    status: GameStatus, detailed: bool, focused: bool, now: datetime, stale: bool
 ) -> list[_Row]:
     if isinstance(status, GenshinStatus):
-        return _genshin_rows(status, detailed, focused, now)
+        return _genshin_rows(status, detailed, focused, now, stale)
     if isinstance(status, HSRStatus):
-        return _hsr_rows(status, detailed, focused, now)
-    return _zzz_rows(status, detailed, focused, now)
+        return _hsr_rows(status, detailed, focused, now, stale)
+    return _zzz_rows(status, detailed, focused, now, stale)
 
 
 @dataclass(frozen=True)
@@ -273,6 +363,7 @@ class _GameView:
     focused: bool
     now: datetime
     include_heading: bool
+    stale: bool
 
     def __rich_console__(
         self, console: Console, options: ConsoleOptions
@@ -282,8 +373,15 @@ class _GameView:
                 GAME_HEADINGS[self.status.game],
                 style=STYLES[f"game.{self.status.game}"],
             )
-        rows = _rows(self.status, self.detailed, self.focused, self.now)
+        rows = _rows(self.status, self.detailed, self.focused, self.now, self.stale)
         layout = choose_layout(options.max_width)
+
+        def styled(value: str, token: str) -> Text:
+            # Cached observations should not read as fresh calls to action.
+            if self.stale and token == "attention":
+                token = "muted"
+            return Text(value, style=STYLES[token])
+
         if layout == "wide":
             table = Table.grid(padding=(0, 2))
             table.add_column(min_width=19)
@@ -292,19 +390,21 @@ class _GameView:
             for row in rows:
                 table.add_row(
                     Text(row.label),
-                    Text(row.primary),
-                    Text(row.secondary, style=STYLES["muted"]),
+                    styled(row.primary, row.primary_style),
+                    styled(row.secondary, row.secondary_style),
                 )
             yield table
         else:
             for row in rows:
                 if layout == "medium":
-                    yield Text(f"{row.label:<21}  {row.primary}")
+                    yield Text(f"{row.label:<21}  ") + styled(
+                        row.primary, row.primary_style
+                    )
                 else:
                     yield Text(row.label)
-                    yield Text(f"  {row.primary}")
+                    yield Text("  ") + styled(row.primary, row.primary_style)
                 if row.secondary:
-                    yield Text(f"  {row.secondary}", style=STYLES["muted"])
+                    yield Text("  ") + styled(row.secondary, row.secondary_style)
 
 
 def render_game(
@@ -314,6 +414,7 @@ def render_game(
     focused: bool,
     now: datetime,
     include_heading: bool = True,
+    stale: bool = False,
 ) -> RenderableType:
     require_aware(now)
-    return _GameView(status, detailed, focused, now, include_heading)
+    return _GameView(status, detailed, focused, now, include_heading, stale)

@@ -76,9 +76,61 @@ def test_temple_supported_details(payload: dict[str, object]) -> None:
     assert temple.currency == CountStatus(1000, 3000)
 
 
-def test_locked_temple_is_not_error(payload: dict[str, object]) -> None:
+def test_level_only_temple_does_not_prove_a_lock(payload: dict[str, object]) -> None:
     payload["temple_running"] = {"level": 0}
-    assert normalize_zzz(payload).temple == "Locked"
+    assert normalize_zzz(payload).temple == "Unavailable"
+
+
+def test_valid_zero_level_temple_retains_reported_management(
+    payload: dict[str, object],
+) -> None:
+    temple = cast(dict[str, object], payload["temple_running"])
+    temple["level"] = 0
+    status = normalize_zzz(payload)
+    assert isinstance(status.temple, TempleStatus)
+    assert status.temple.level == 0
+    assert status.temple.bench.state == "Can produce"
+
+
+@pytest.mark.parametrize("missing", ["omitted", "null"])
+def test_missing_zzz_states_remain_unknown(
+    payload: dict[str, object], missing: str
+) -> None:
+    for field in (
+        "card_sign",
+        "vhs_sale",
+        "bounty_commission",
+        "survey_points",
+        "weekly_task",
+        "member_card",
+        "temple_running",
+    ):
+        if missing == "null":
+            payload[field] = None
+        else:
+            payload.pop(field)
+    status = normalize_zzz(payload)
+    assert status.bounties_state == "Unavailable"
+    assert status.hollow_zero_bounties is None
+    assert status.hollow_zero_points is None
+    assert status.weekly_tasks is None
+    assert status.scratch_card == status.video_store == "Unavailable"
+    assert status.member_card.state == status.temple == "Unavailable"
+
+
+@pytest.mark.parametrize("unlock", [None, True])
+def test_missing_unlock_flag_does_not_change_bounty_quantities(
+    payload: dict[str, object], unlock: bool | None
+) -> None:
+    payload["bounty_commission"] = {
+        "num": 0,
+        "total": 8000,
+        "refresh_time": 86400,
+        "unlock": unlock,
+    }
+    status = normalize_zzz(payload)
+    assert status.hollow_zero_bounties == CountStatus(0, 8000)
+    assert status.bounties_state == "Available"
 
 
 def test_missing_optional_zzz_system(payload: dict[str, object]) -> None:

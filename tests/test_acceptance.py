@@ -5,6 +5,7 @@ import subprocess
 import sys
 from datetime import timedelta
 from pathlib import Path
+from typing import cast
 from unittest.mock import call
 
 import genshin
@@ -43,6 +44,67 @@ def test_all_three_fresh(
         )
     assert result.output.count("Updated") == 1 and "STALE" not in result.output
     assert len(list(acceptance_env.cache.rglob("*.json"))) == 3
+    acceptance_env.client.get_reward_info.assert_not_called()
+    acceptance_env.client.claim_daily_reward.assert_not_called()
+
+
+@pytest.mark.parametrize("width", [48, 70, 100])
+@pytest.mark.parametrize("detailed", [False, True])
+def test_daily_state_hierarchy_remains_clear_without_color(
+    runner: CliRunner,
+    acceptance_env: AcceptanceEnvironment,
+    width: int,
+    detailed: bool,
+) -> None:
+    acceptance_env.width = width
+    genshin_payload = cast(
+        dict[str, object], acceptance_env.notes("genshin").return_value
+    )
+    genshin_payload.update(
+        current_resin=200,
+        resin_recovery_time="0",
+        finished_task_num=2,
+        is_extra_task_reward_received=False,
+    )
+    hsr_payload = cast(dict[str, object], acceptance_env.notes("hsr").return_value)
+    hsr_payload["expeditions"] = [
+        {"name": "Finished assignment", "remaining_time": 0, "status": "Finished"}
+    ]
+    zzz_payload = cast(dict[str, object], acceptance_env.notes("zzz").return_value)
+    zzz_payload["member_card"] = {
+        "member_card_state": "MemberCardStateNo",
+        "exp_time": "0",
+        "is_open": False,
+    }
+    zzz_payload["bounty_commission"] = {
+        "num": 0,
+        "total": 8000,
+        "refresh_time": 86400,
+        "unlock": True,
+    }
+    zzz_payload.pop("survey_points")
+    result = runner.invoke(main, ["--no-color", *(["--detailed"] if detailed else [])])
+    assert result.exit_code == 0, result.output
+    for text in (
+        "200 / 200",
+        "Full",
+        "2 / 4",
+        "Reward unclaimed",
+        "finished",
+        "400 / 400",
+        "Done",
+        "Inactive",
+        "0 / 8000",
+    ):
+        assert text in result.output
+    hollow = result.output[
+        result.output.index("Hollow Zero") : result.output.index("Weekly Tasks")
+    ]
+    assert hollow.count("0 / 8000") == 1
+    assert "HoYo Daily · main" in result.output and "Updated" in result.output
+    assert "Investigation Unavailable" not in result.output
+    assert "\x1b" not in result.output and "…" not in result.output
+    assert all(cell_len(line) <= width for line in result.output.splitlines())
     acceptance_env.client.get_reward_info.assert_not_called()
     acceptance_env.client.claim_daily_reward.assert_not_called()
 

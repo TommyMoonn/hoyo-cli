@@ -7,6 +7,8 @@ STYLES = {
     "muted": "dim",
     "success": "green",
     "warning": "yellow",
+    "attention": "bold yellow",
+    "complete": "dim",
     "error": "red",
     "stale": "bold yellow",
     "heading": "bold",

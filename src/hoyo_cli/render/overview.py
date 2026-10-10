@@ -53,6 +53,7 @@ def render_overview(
                     focused=focused,
                     now=now,
                     include_heading=False,
+                    stale=result.stale,
                 )
             )
         else:

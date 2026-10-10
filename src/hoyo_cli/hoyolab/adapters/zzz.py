@@ -60,12 +60,9 @@ def _member(value: object, now: datetime) -> TimedActivity:
     )
 
 
-def _temple(value: object, now: datetime) -> TempleStatus | Literal["Locked"]:
+def _temple(value: object, now: datetime) -> TempleStatus:
     data = mapping(value)
     level = integer(data["level"])
-    # Level zero has no management progress; present this as a locked subsystem.
-    if level == 0:
-        return "Locked"
     bench = TimedActivity(
         "Temple Bench",
         state(
@@ -197,11 +194,7 @@ def normalize_zzz(upstream: object, *, now: datetime | None = None) -> ZZZStatus
                 data.get("member_card"), lambda value: _member(value, captured)
             )
             or TimedActivity("Member Card", "Unavailable"),
-            temple=temple
-            if isinstance(temple, TempleStatus)
-            else "Locked"
-            if temple == "Locked"
-            else "Unavailable",
+            temple=temple or "Unavailable",
             bounties_state=bounty.availability if bounty else "Unavailable",
             bounties_reset_at=bounty.reset_at if bounty else None,
             weekly_reset_at=weekly_reset,

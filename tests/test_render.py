@@ -1,6 +1,7 @@
 """Semantic terminal output and explicit layout/color policies."""
 
 import json
+from collections.abc import Callable
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from io import StringIO
@@ -12,8 +13,17 @@ from rich.console import Console
 
 from hoyo_cli.errors import AppError, NetworkError
 from hoyo_cli.hoyolab.adapters.genshin import normalize_genshin
-from hoyo_cli.models.common import GameId, GameStatus, StatusResult
+from hoyo_cli.hoyolab.adapters.zzz import normalize_zzz
+from hoyo_cli.models.common import (
+    CountStatus,
+    GameId,
+    GameStatus,
+    ResourceStatus,
+    StatusResult,
+)
 from hoyo_cli.models.genshin import GenshinStatus
+from hoyo_cli.models.hsr import HSRStatus
+from hoyo_cli.models.zzz import ZZZStatus
 from hoyo_cli.render.console import make_console
 from hoyo_cli.render.game import render_game
 from hoyo_cli.render.overview import render_overview
@@ -43,6 +53,87 @@ def render_text(
     console = Console(file=output, width=width, color_system=None)
     console.print(render_game(status, detailed=detailed, focused=focused, now=now))
     return output.getvalue()
+
+
+@pytest.fixture
+def zzz_snapshot() -> ZZZStatus:
+    payload: object = json.loads(
+        (Path(__file__).parent / "fixtures/zzz_notes.json").read_text()
+    )
+    return normalize_zzz(payload, now=NOW)
+
+
+@pytest.fixture
+def color_console(monkeypatch: pytest.MonkeyPatch) -> Callable[[int], Console]:
+    # A styled terminal simulation must not inherit the test host's dumb TERM.
+    monkeypatch.setenv("TERM", "xterm-256color")
+
+    def make(width: int) -> Console:
+        return Console(
+            file=StringIO(),
+            width=width,
+            force_terminal=True,
+            color_system="truecolor",
+            no_color=False,
+            legacy_windows=False,
+        )
+
+    return make
+
+
+@pytest.mark.parametrize("width", [48, 70, 100])
+@pytest.mark.parametrize("mode", ["compact", "focused", "detailed"])
+@pytest.mark.parametrize(
+    "availability", ["bounty-only", "investigation-only", "both", "absent", "locked"]
+)
+def test_hollow_zero_metrics_are_unambiguous(
+    zzz_snapshot: ZZZStatus, width: int, mode: str, availability: str
+) -> None:
+    snapshot = replace(
+        zzz_snapshot,
+        hollow_zero_bounties=(
+            CountStatus(0, 8000) if availability in ("bounty-only", "both") else None
+        ),
+        hollow_zero_points=(
+            CountStatus(600, 800)
+            if availability in ("investigation-only", "both")
+            else None
+        ),
+        bounties_state=(
+            "Locked"
+            if availability == "locked"
+            else "Available"
+            if availability in ("bounty-only", "both")
+            else "Unavailable"
+        ),
+    )
+    output = render_text(
+        snapshot, width, focused=mode == "focused", detailed=mode == "detailed"
+    )
+    section = output[output.index("Hollow Zero") : output.index("Weekly Tasks")]
+    if availability in ("bounty-only", "both"):
+        assert section.count("0 / 8000") == 1
+    if availability in ("investigation-only", "both"):
+        assert section.count("600 / 800") == 1
+        assert "Investigation" in section
+    if mode == "compact":
+        assert section.count("Hollow Zero") == 1
+        if availability == "bounty-only":
+            assert "Bounties" not in section and "Investigation" not in section
+        if availability == "investigation-only":
+            assert "Bounties" not in section
+        if availability == "both":
+            assert "Bounties" in section
+    else:
+        assert "Hollow Zero Bounties" in section
+        assert "Hollow Zero Investigation" in section
+        assert not any(line.strip() == "Hollow Zero" for line in section.splitlines())
+    if availability == "absent":
+        assert "Data unavailable" in section and "Locked" not in section
+    if availability == "locked":
+        assert "Locked" in section
+    assert "…" not in output
+    assert all(len(line) <= width for line in output.splitlines())
 
 
 def test_genshin_compact_rows(status_snapshot: GenshinStatus) -> None:
@@ -445,3 +536,278 @@ def test_cache_write_warning_is_distinct_from_fetch_error(
     assert "Unable to save status cache" in text
     assert "Updated 18:31" in text and "190 / 200" in text
     assert "Unable to fetch" not in text and "STALE" not in text
+
+
+@pytest.mark.parametrize("width", [48, 70, 100])
+@pytest.mark.parametrize("mode", ["compact", "focused", "detailed"])
+def test_missing_zzz_fields_display_unknown_not_gameplay_states(
+    width: int, mode: str
+) -> None:
+    payload: object = {
+        "energy": {"progress": {"current": 89, "max": 240}, "restore": 55260},
+        "vitality": {"current": 400, "max": 400},
+    }
+    output = render_text(
+        normalize_zzz(payload, now=NOW),
+        width,
+        focused=mode == "focused",
+        detailed=mode == "detailed",
+    )
+    assert "Data unavailable" in output
+    for inferred in ("Locked", "Done", "Inactive", "Unavailable"):
+        assert inferred not in output
+    assert all(len(line) <= width for line in output.splitlines())
+
+
+@pytest.mark.parametrize("width", [48, 70, 100])
+def test_actionable_states_have_semantic_emphasis(
+    status_snapshot: GenshinStatus,
+    width: int,
+    color_console: Callable[[int], Console],
+) -> None:
+    from rich.text import Text
+
+    status = replace(
+        status_snapshot,
+        resin=replace(status_snapshot.resin, current=200, full_at=None),
+        commissions=CountStatus(2, 4),
+        commission_reward_claimed=False,
+    )
+    console = color_console(width)
+    assert console.width == width
+    with console.capture() as captured:
+        console.print(render_game(status, detailed=False, focused=True, now=NOW))
+    text = Text.from_ansi(captured.get())
+    for value in ("200 / 200", "2 / 4", "Reward unclaimed", "1 finished", "Finished"):
+        style = text.get_style_at_offset(console, text.plain.index(value))
+        assert style.bold is True, value
+        assert style.color is not None and style.color.number == 3, value
+
+
+@pytest.mark.parametrize("width", [48, 70, 100])
+def test_explicit_completion_is_quiet_without_claim_inference(
+    zzz_snapshot: ZZZStatus,
+    width: int,
+    color_console: Callable[[int], Console],
+) -> None:
+    from rich.text import Text
+
+    status = replace(
+        zzz_snapshot, member_card=replace(zzz_snapshot.member_card, state="Inactive")
+    )
+    console = color_console(width)
+    assert console.width == width
+    with console.capture() as captured:
+        console.print(render_game(status, detailed=False, focused=False, now=NOW))
+    text = Text.from_ansi(captured.get())
+    for value in ("400 / 400", "Done", "8000 / 8000", "Inactive"):
+        style = text.get_style_at_offset(console, text.plain.index(value))
+        assert style == console.get_style("dim"), value
+    assert "Claimed" not in text.plain and "Reward claimed" not in text.plain
+
+
+def test_complete_commissions_still_show_unclaimed_reward(
+    status_snapshot: GenshinStatus,
+    color_console: Callable[[int], Console],
+) -> None:
+    from rich.text import Text
+
+    status = replace(status_snapshot, commission_reward_claimed=False)
+    console = color_console(100)
+    with console.capture() as captured:
+        console.print(render_game(status, detailed=False, focused=False, now=NOW))
+    text = Text.from_ansi(captured.get())
+    assert "4 / 4" in text.plain and "Reward unclaimed" in text.plain
+    style = text.get_style_at_offset(console, text.plain.index("Reward unclaimed"))
+    assert style.bold is True
+    assert style.color is not None and style.color.number == 3
+
+
+@pytest.mark.parametrize("width", [48, 70, 100])
+def test_mixed_freshness_emphasizes_only_current_actions(
+    status_snapshot: GenshinStatus,
+    zzz_snapshot: ZZZStatus,
+    width: int,
+    color_console: Callable[[int], Console],
+) -> None:
+    from rich.text import Text
+
+    fresh = replace(
+        status_snapshot,
+        resin=replace(status_snapshot.resin, current=200, full_at=None),
+    )
+    console = color_console(width)
+    with console.capture() as captured:
+        console.print(
+            render_overview(
+                (
+                    StatusResult("genshin", fresh, NOW),
+                    StatusResult(
+                        "zzz",
+                        zzz_snapshot,
+                        NOW - timedelta(minutes=34),
+                        stale=True,
+                        error=NetworkError("Timeout."),
+                    ),
+                ),
+                account="main",
+                detailed=False,
+                now=NOW,
+            )
+        )
+    text = Text.from_ansi(captured.get())
+    style = text.get_style_at_offset(console, text.plain.index("200 / 200"))
+    assert style.bold is True and style.color is not None and style.color.number == 3
+    stale_action = text.get_style_at_offset(
+        console, text.plain.index("Revenue available")
+    )
+    assert stale_action.dim is True and stale_action.color is None
+    assert "Snapshot estimate" in text.plain and "STALE · fetched 34m ago" in text.plain
+    assert "Updated" not in text.plain
+
+
+@pytest.mark.parametrize("game", ["genshin", "hsr", "zzz"])
+@pytest.mark.parametrize("width", [48, 70, 100])
+@pytest.mark.parametrize("elapsed", [False, True])
+@pytest.mark.parametrize("detailed", [False, True])
+def test_stale_resource_times_are_snapshot_estimates(
+    game: GameId, width: int, elapsed: bool, detailed: bool
+) -> None:
+    from hoyo_cli.hoyolab.adapters.hsr import normalize_hsr
+
+    payload: object = json.loads(
+        (Path(__file__).parent / f"fixtures/{game}_notes.json").read_text()
+    )
+    snapshot = {
+        "genshin": normalize_genshin,
+        "hsr": normalize_hsr,
+        "zzz": normalize_zzz,
+    }[game](payload, now=NOW)
+    # Fix one deadline to exercise both sides of render time without changing counts.
+    resource = {
+        "genshin": "resin",
+        "hsr": "power",
+        "zzz": "battery",
+    }[game]
+    original = getattr(snapshot, resource)
+    snapshot = replace(
+        snapshot, **{resource: replace(original, full_at=NOW + timedelta(hours=1))}
+    )
+    render_time = NOW + timedelta(hours=2 if elapsed else 0, minutes=34)
+    output = StringIO()
+    Console(file=output, width=width, color_system=None).print(
+        render_overview(
+            (
+                StatusResult(
+                    game, snapshot, NOW, stale=True, error=NetworkError("Timeout.")
+                ),
+            ),
+            account="main",
+            detailed=detailed,
+            now=render_time,
+        )
+    )
+    text = output.getvalue()
+    assert "Snapshot estimate" in text and "19:31" in text
+    assert "Full in" not in text and "Recovery time elapsed" not in text
+    assert "STALE · fetched" in text and "Updated" not in text
+    expected = {"genshin": "190 / 200", "hsr": "211 / 300", "zzz": "89 / 240"}
+    assert expected[game] in text
+    assert getattr(snapshot, resource).full_at == NOW + timedelta(hours=1)
+    assert "…" not in text
+    assert all(len(line) <= width for line in text.splitlines())
+
+
+@pytest.fixture(params=["genshin", "hsr", "zzz"])
+def resource_deadline_snapshot(
+    request: pytest.FixtureRequest,
+) -> tuple[GameStatus, tuple[tuple[str, ResourceStatus], ...]]:
+    from hoyo_cli.hoyolab.adapters.hsr import normalize_hsr
+
+    game = cast(GameId, request.param)
+    payload: object = json.loads(
+        (Path(__file__).parent / f"fixtures/{game}_notes.json").read_text()
+    )
+    snapshot = {
+        "genshin": normalize_genshin,
+        "hsr": normalize_hsr,
+        "zzz": normalize_zzz,
+    }[game](payload, now=NOW)
+    deadline = NOW + timedelta(hours=1)
+    if isinstance(snapshot, GenshinStatus):
+        assert snapshot.realm_currency is not None
+        snapshot = replace(
+            snapshot,
+            resin=replace(snapshot.resin, full_at=deadline),
+            realm_currency=replace(
+                snapshot.realm_currency, full_at=deadline + timedelta(hours=1)
+            ),
+        )
+        assert snapshot.realm_currency is not None
+        resources = (
+            ("Resin full at", snapshot.resin),
+            ("Realm full at", snapshot.realm_currency),
+        )
+    elif isinstance(snapshot, HSRStatus):
+        snapshot = replace(snapshot, power=replace(snapshot.power, full_at=deadline))
+        resources = (("Power full at", snapshot.power),)
+    else:
+        snapshot = replace(
+            snapshot, battery=replace(snapshot.battery, full_at=deadline)
+        )
+        resources = (("Battery full at", snapshot.battery),)
+    return snapshot, resources
+
+
+@pytest.mark.parametrize("width", [48, 70, 100])
+@pytest.mark.parametrize("elapsed", [False, True])
+@pytest.mark.parametrize("stale", [False, True])
+def test_detailed_resource_deadlines_respect_freshness(
+    resource_deadline_snapshot: tuple[
+        GameStatus, tuple[tuple[str, ResourceStatus], ...]
+    ],
+    width: int,
+    elapsed: bool,
+    stale: bool,
+) -> None:
+    snapshot, resources = resource_deadline_snapshot
+    render_time = NOW + timedelta(hours=2 if elapsed else 0, minutes=34)
+    output = StringIO()
+    Console(file=output, width=width, color_system=None).print(
+        render_overview(
+            (
+                StatusResult(
+                    snapshot.game,
+                    snapshot,
+                    NOW,
+                    stale=stale,
+                    error=NetworkError("Timeout.") if stale else None,
+                ),
+            ),
+            account="main",
+            detailed=True,
+            focused=True,
+            now=render_time,
+        )
+    )
+    text = output.getvalue()
+    for label, resource in resources:
+        assert resource.full_at is not None
+        assert (resource.full_at < render_time) == elapsed
+        assert f"{resource.current} / {resource.maximum}" in text
+        assert resource.full_at.strftime("%H:%M") in text
+        if stale:
+            assert label not in text
+        else:
+            assert label in text
+    if stale:
+        age = "2h 34m" if elapsed else "34m"
+        assert f"STALE · fetched {age} ago" in text
+        assert text.count("Snapshot estimate") == len(resources)
+        assert "Full in" not in text and "Updated" not in text
+    else:
+        assert "Snapshot estimate" not in text and "STALE" not in text
+        assert "Updated" in text
+        assert ("Full in" in text) == (not elapsed)
+    assert "\x1b" not in text and "…" not in text
+    assert all(len(line) <= width for line in text.splitlines())
