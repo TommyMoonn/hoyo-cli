@@ -4,6 +4,7 @@ import os
 import stat
 import tempfile
 from collections.abc import MutableMapping
+from dataclasses import dataclass
 from pathlib import Path
 from typing import cast
 
@@ -17,16 +18,20 @@ from hoyo_cli.errors import ConfigError
 from hoyo_cli.models.common import GAME_IDS, GameId
 
 
-def _read_document(path: Path) -> TOMLDocument:
+def _read_snapshot(path: Path) -> tuple[TOMLDocument, bytes]:
     try:
-        with path.open("r", encoding="utf-8", newline="") as stream:
-            return tomlkit.parse(stream.read())
+        original = path.read_bytes()
+        return tomlkit.parse(original.decode("utf-8")), original
     except FileNotFoundError:
         raise ConfigError(f"Configuration file not found.\nConfig: {path}") from None
     except (ParseError, UnicodeError):
         raise ConfigError(f"Invalid TOML configuration.\nConfig: {path}") from None
     except OSError:
         raise ConfigError(f"Unable to read configuration.\nConfig: {path}") from None
+
+
+def _read_document(path: Path) -> TOMLDocument:
+    return _read_snapshot(path)[0]
 
 
 def _validate(document: TOMLDocument, path: Path) -> AppConfig:
@@ -91,6 +96,7 @@ def _atomic_write(path: Path, content: str) -> None:
             os.fsync(stream.fileno())
         _reject_symlink(path)
         os.replace(temporary, path)
+        temporary = None
     except OSError:
         raise ConfigError(f"Unable to save configuration.\nConfig: {path}") from None
     finally:
@@ -103,19 +109,27 @@ def _atomic_write(path: Path, content: str) -> None:
                 ) from None
 
 
-def save_account(
+@dataclass(frozen=True, repr=False)
+class PreparedConfig:
+    path: Path
+    content: str
+    original: bytes | None
+
+
+def prepare_account(
     path: Path,
     name: str,
     account: AccountConfig,
     *,
     make_default: bool,
     game_order: tuple[GameId, ...],
-) -> None:
+) -> PreparedConfig:
     _reject_symlink(path)
     if path.exists():
-        document = _read_document(path)
+        document, original = _read_snapshot(path)
         _validate(document, path)
     else:
+        original = None
         document = tomlkit.document()
         document["version"] = 1
         document["default_account"] = name
@@ -140,4 +154,41 @@ def save_account(
     # Reparse the exact serialized candidate before creating or replacing any file.
     content = tomlkit.dumps(document)
     _validate(tomlkit.parse(content), path)
-    _atomic_write(path, content)
+    return PreparedConfig(path, content, original)
+
+
+def commit_config(prepared: PreparedConfig) -> None:
+    _reject_symlink(prepared.path)
+    try:
+        current = prepared.path.read_bytes()
+    except FileNotFoundError:
+        current = None
+    except OSError:
+        raise ConfigError(
+            f"Unable to verify configuration before saving.\nConfig: {prepared.path}"
+        ) from None
+    if current != prepared.original:
+        raise ConfigError(
+            "Configuration changed during setup; rerun hoyo init.\n"
+            f"Config: {prepared.path}"
+        )
+    _atomic_write(prepared.path, prepared.content)
+
+
+def save_account(
+    path: Path,
+    name: str,
+    account: AccountConfig,
+    *,
+    make_default: bool,
+    game_order: tuple[GameId, ...],
+) -> None:
+    commit_config(
+        prepare_account(
+            path,
+            name,
+            account,
+            make_default=make_default,
+            game_order=game_order,
+        )
+    )

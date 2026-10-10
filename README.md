@@ -13,9 +13,11 @@ cached status no older than three hours. Daily reward claims require an explicit
 Phase 1 provides an installable `hoyo` command, help/version output, command
 parsing, and offline developer tooling. Phase 2 adds typed config validation,
 safe configuration persistence, and working config inspection and editing.
-Status fetching, account setup, and check-in are planned and are not available
-yet. Invoking those unfinished commands prints a concise "not configured yet"
-error and exits with code `2`. No HoYoLAB requests or reward claims occur.
+Phase 3 adds interactive account setup, HoYoLAB linked-character discovery,
+browser-cookie import, and explicit keyring or plaintext credential storage.
+Status fetching and check-in remain unavailable. Those unfinished commands
+print a concise "not configured yet" error and exit with code `2`.
+Setup makes a read-only linked-account request; no command claims rewards yet.
 
 ## Prerequisites
 
@@ -56,8 +58,8 @@ path setup instructions and open a new shell.
 
 ## Command grammar
 
-These forms parse now. Help, version, config inspection, and config editing are
-functional. The status, setup, and check-in handlers remain planned.
+Help, version, account setup, config inspection, and config editing are
+functional. Status and check-in remain planned.
 
 | Command | Availability and behavior |
 | --- | --- |
@@ -65,7 +67,7 @@ functional. The status, setup, and check-in handlers remain planned.
 | `hoyo status <game>` | Planned: focused status for `genshin`, `hsr`, or `zzz` |
 | `hoyo genshin`, `hoyo hsr`, `hoyo zzz` | Registered aliases for `hoyo status <game>` |
 | `hoyo check-in [game]` | Planned: explicit daily reward claim |
-| `hoyo init` | Planned: interactive account setup |
+| `hoyo init` | Available: interactive account setup or reconfiguration |
 | `hoyo config` | Available: inspect non-secret configuration |
 | `hoyo config --edit` | Available: open valid configuration in the selected editor |
 
@@ -74,7 +76,8 @@ functional. The status, setup, and check-in handlers remain planned.
 An account supplied on the command overrides one supplied at the root; boolean
 flags remain enabled if supplied in either position. Account identifiers are
 passed through exactly, including case. Config commands validate the requested
-account; status and setup will use the same validator when implemented.
+account. On an existing config, setup also requires an exact account when
+`--account` is supplied; use the setup menu to create a new account.
 
 For working command-specific help:
 
@@ -86,10 +89,11 @@ uv run hoyo config --help
 
 ## Configuration
 
-Configuration lives at `~/.hoyo/config.toml`. Until interactive setup arrives,
-create it manually using the [version 1 example](specs/config.md). Then run:
+Configuration lives at `~/.hoyo/config.toml`. Configure it interactively or use
+the [version 1 example](specs/config.md):
 
 ```powershell
+uv run hoyo init
 uv run hoyo config
 uv run hoyo config --account alt
 uv run hoyo config --edit
@@ -114,6 +118,53 @@ an atomic replacement so failed writes leave the original bytes intact.
 Writes refuse symbolic-link config paths, including dangling links, to avoid
 disconnecting managed dotfiles. Edit the managed target directly in that case.
 
+## Account setup
+
+`hoyo init` asks for an account name or existing account, browser import or a
+hidden full Cookie header, a linked UID and enabled flag for each discovered
+game, default-account selection, game order, and a credential backend.
+It shows an explicit numbered browser choice, even for a single session.
+Browser scanning is optional and restricted to HoYoLAB authentication cookies
+through supported Chrome, Edge, Firefox, Chromium, Opera, and Brave loaders.
+Browser access failures offer manual input without choosing another browser.
+
+For manual input, paste the semicolon-separated `Cookie` header from an
+authenticated HoYoLAB request, not the `Cookie:` label. The parser keeps only
+recognized authentication fields. It accepts `ltuid` with `ltoken`, or
+`ltuid_v2` with `ltoken_v2`; matching account-ID aliases and additional v2
+credential fields are preserved. Missing, duplicate, or conflicting fields
+fail without echoing the header. The upstream
+[authentication reference](https://seria.is-a.dev/genshin.py/authentication/)
+describes obtaining cookies. Treat the complete header as a password.
+
+The keyring is offered first. Plaintext requires explicit selection or consent
+after an unavailable-keyring error, plus a setup warning. Secrets go in the
+`hoyo-cli` keyring service under the exact account name, or separately in
+`~/.hoyo/credentials.toml`. POSIX file mode is `0600`. On Windows, chmod does
+not create a private ACL; the file inherits directory permissions. Prefer the
+OS keyring and keep the fallback directory private.
+
+Existing account credentials are replaced only after consent. Setup requires
+a new imported or pasted session; declining replacement cancels setup without
+changing files. Switching backends does not migrate or delete the old backend's
+secrets. Remove old
+entries yourself if no longer needed. Malformed config or plaintext credential
+files must be repaired manually; malformed keyring entries must be repaired or
+removed before setup.
+
+Setup preserves other accounts, comments, and unknown config fields. For the
+account being reconfigured, games not rediscovered are disabled while their
+prior UIDs are retained for manual recovery. Setup warns about previously
+enabled games that will be disabled if saved. Only a UID selected from the
+current session's linked characters can be enabled, and at least one such game
+must be enabled. Nothing is written until final consent and config validation.
+If the config changes after preparation, saving fails.
+If config persistence fails after storing credentials, setup restores the
+prior backend state, including exact plaintext bytes or file absence. If
+rollback itself fails, the error requests backend repair. This is recovery
+within the running process, not a cross-backend transaction against process
+termination or concurrent credential writers.
+
 ## Project layout
 
 - `src/hoyo_cli/`: application package and command routing.
@@ -125,7 +176,7 @@ disconnecting managed dotfiles. Edit the managed target directly in that case.
 ## Credential hygiene
 
 Never put real HoYoLAB cookies or credentials in source code, test fixtures, or
-shared archives. Configuration lives at `~/.hoyo/config.toml`; planned preferred
-credential storage uses the OS keyring. An explicit plaintext fallback will use
+shared archives. Configuration lives at `~/.hoyo/config.toml`; preferred
+credential storage uses the OS keyring. An explicit plaintext fallback uses
 the separate `~/.hoyo/credentials.toml` file. The project ignores `.hoyo/`,
 `credentials.toml`, cookie files, and local environment files.

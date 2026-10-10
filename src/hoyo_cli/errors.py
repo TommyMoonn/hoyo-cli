@@ -11,3 +11,20 @@ class AppError(Exception):
 class ConfigError(AppError):
     def __init__(self, message: str) -> None:
         super().__init__(message, exit_code=2)
+
+
+class CredentialError(AppError):
+    def __init__(self, message: str) -> None:
+        super().__init__(message, exit_code=3)
+
+
+class BackendUnavailable(CredentialError):
+    """The selected secret backend cannot be accessed, not invalid credentials."""
+
+
+class AuthenticationError(CredentialError):
+    """HoYoLAB rejected an authenticated read."""
+
+
+class BrowserImportError(CredentialError):
+    """A browser session cannot be read; manual input remains available."""

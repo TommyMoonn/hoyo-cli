@@ -130,7 +130,9 @@ def check_in_command(
 @click.pass_context
 def init_command(ctx: click.Context, account: str | None, no_color: bool) -> None:
     """Set up or reconfigure an account interactively."""
-    init.run_init(options=_resolve_options(ctx, account=account, no_color=no_color))
+    init.configure_account(
+        options=_resolve_options(ctx, account=account, no_color=no_color)
+    )
 
 
 @main.command(name="config")

@@ -92,7 +92,7 @@ def test_root_account_survives_local_boolean_flags(
             "hoyo_cli.commands.check_in.run_check_in",
             {"game": "zzz"},
         ),
-        (["init"], "hoyo_cli.commands.init.run_init", {}),
+        (["init"], "hoyo_cli.commands.init.configure_account", {}),
         (["config"], "hoyo_cli.commands.config.run_config", {"edit": False}),
         (["config", "--edit"], "hoyo_cli.commands.config.run_config", {"edit": True}),
     ],
@@ -163,7 +163,6 @@ def test_root_help_lists_command_surface(runner: CliRunner) -> None:
         ["zzz"],
         ["check-in"],
         ["check-in", "genshin"],
-        ["init"],
     ],
 )
 def test_unimplemented_commands_fail_cleanly(

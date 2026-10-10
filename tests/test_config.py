@@ -448,7 +448,8 @@ def test_config_cli_reads_only_config(
         patch("pathlib.Path.open", autospec=True, side_effect=original_open) as reads,
     ):
         result = runner.invoke(main, ["config", "--no-color"])
-    reads.assert_called_once_with(path, "r", encoding="utf-8", newline="")
+    reads.assert_called_once()
+    assert reads.call_args.args[0] == path
     assert result.exit_code == 0, result.output
     assert "main" in result.output
     assert "444444444" in result.output
