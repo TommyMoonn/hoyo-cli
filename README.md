@@ -3,30 +3,52 @@
 A local command-line utility for HoYoLAB status in Genshin Impact, Honkai: Star
 Rail, and Zenless Zone Zero.
 
-The planned workflow fetches fresh daily and weekly status for enabled games,
+The CLI fetches fresh daily and weekly status for enabled games,
 supports exact named-account selection, and falls back to clearly labeled
 cached status no older than three hours. Daily reward claims require an explicit
 `hoyo check-in` command. Config inspection is read-only.
 
-## Current state
+## Local installation and first use
 
-Phase 1 provides an installable `hoyo` command, help/version output, command
-parsing, and offline developer tooling. Phase 2 adds typed config validation,
-safe configuration persistence, and working config inspection and editing.
-Phase 3 adds interactive account setup, HoYoLAB linked-character discovery,
-browser-cookie import, and explicit keyring or plaintext credential storage.
-Setup makes a read-only linked-account request.
+Use Python 3.11 or newer and [uv](https://docs.astral.sh/uv/). Development uses
+Python 3.12, recorded in `.python-version`. From this project directory:
 
-Phase 4 adds immutable status snapshots, a bounded read-only HoYoLAB gateway,
-Genshin notes normalization, and compact/focused/detailed Rich views. The views
+```powershell
+uv sync --locked
+uv run hoyo --help
+uv tool install .
+hoyo --help
+hoyo init
+hoyo
+hoyo genshin --detailed
+hoyo --account alt
+hoyo check-in zzz
+hoyo config --edit
+```
+
+Create `alt` using `hoyo init` before selecting it. Setup and status need an
+authenticated HoYoLAB session and internet access. Check-in is the only command
+that claims rewards. To remove the installed tool:
+
+```powershell
+uv tool uninstall hoyo-cli
+```
+
+If uv reports that its tool bin directory is absent from `PATH`, follow its
+path setup instructions and open a new shell. During development, prefix commands
+with `uv run` to use the project environment.
+
+## Status behavior
+
+Compact, focused, and detailed views cover all three games. The views
 have explicit wide (80+), medium (60-79), and narrow (below 60) layouts.
 The gateway disables automatic notes authorization and uses at most two
 10-second attempts for transient read failures. Authentication and unsupported
 data failures are not retried. Application retry control is isolated against
 the pinned library's internal retries, preserving its per-request session cleanup.
-Phase 5 exposes all three games through `hoyo`, `hoyo status`, and the game
-aliases. Enabled games fetch concurrently through one gateway for the selected
-account, and results retain configured order. One failed game keeps its error
+Use `hoyo`, `hoyo status`, or the game aliases. Enabled games fetch concurrently
+through one gateway for the selected account, and results retain configured order.
+One failed game keeps its error
 section beside successful games. Status exits `0` if any game succeeds, `1` if
 all fail, `2` for configuration/usage failures, and `3` for missing or invalid
 credentials before requests begin. Status reads never claim rewards or enable
@@ -40,7 +62,7 @@ informational. Temple level zero is interpreted as `Locked`. HSR's reserve cap
 is 2,400, from [HoYoWiki](https://wiki.hoyolab.com/pc/hsr/entry/179?lang=en-us),
 because the pinned notes response supplies only the amount and full-state flag.
 
-Phase 6 adds validated, atomic per-game cache snapshots in the OS cache directory
+Validated, atomic per-game cache snapshots live in the OS cache directory
 resolved by `platformdirs`. Every status invocation requests fresh data first.
 Each successful game updates its own snapshot immediately. If its request fails,
 that game can display its cached snapshot when it is no more than three hours old,
@@ -62,7 +84,7 @@ ineligible and are replaced by the next successful fresh fetch. Fresh snapshots
 record the time their request completes. Failed requests leave their previous
 cache bytes untouched.
 
-Phase 7 adds explicit daily check-in through `hoyo check-in [game]`. Each game
+Explicit daily check-in uses `hoyo check-in [game]`. Each game
 reads today's check-in state first and skips the claim if already checked in.
 Unclaimed games make one claim attempt; ambiguous claim failures are never
 retried automatically. Outcomes retain configured order and failures do not
@@ -80,11 +102,6 @@ as failed because a later reward lookup failed. A known already-claimed
 response also counts as success if another caller claimed after the state read.
 If a claim times out or loses its connection, the result warns that it may
 have completed; check today's state before trying again.
-
-## Prerequisites
-
-Use Python 3.11 or newer and [uv](https://docs.astral.sh/uv/). Development uses
-Python 3.12, recorded in `.python-version`.
 
 ## Development
 
@@ -106,17 +123,23 @@ pinned to `genshin==1.7.31`; its cookie integration accepts the installed
 no HoYoLAB account. Lint and formatting exclude the original specs and the
 repository plan copy to preserve their text.
 
-To install the command for local use:
+### Optional live status verification
+
+The default test run excludes `tests/live/` and blocks network connections.
+After `hoyo init`, explicitly opt into real status reads with:
 
 ```powershell
-uv tool install .
-hoyo --help
-hoyo --version
-uv tool uninstall hoyo-cli
+uv run pytest --live-read-only -m live_read_only tests/live -q
 ```
 
-If uv reports that its tool bin directory is absent from `PATH`, follow its
-path setup instructions and open a new shell.
+This reads fresh status for every enabled game on the default account using its
+configured credential backend. To select another exact account, set
+`$env:HOYO_LIVE_ACCOUNT = "alt"` for the test, then remove it with
+`Remove-Item Env:HOYO_LIVE_ACCOUNT`. No cookies are passed on the command line.
+Missing configuration or credentials skip the live test; API failures fail it
+with a classified message. Live verification never claims rewards, authorizes
+notes automatically, or reads/writes status cache. Selecting the marker alone
+does not enable network access; the flag is required.
 
 ## Command grammar
 
