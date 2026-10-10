@@ -4,7 +4,7 @@ import asyncio
 from datetime import UTC, datetime, timedelta
 from importlib.metadata import version
 from pathlib import Path
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, call, patch
 
 import pytest
 from click.testing import CliRunner
@@ -169,12 +169,16 @@ def test_root_help_lists_command_surface(runner: CliRunner) -> None:
         ["check-in", "genshin"],
     ],
 )
-def test_unimplemented_commands_fail_cleanly(
-    runner: CliRunner, arguments: list[str]
+def test_checkin_without_config_fails_cleanly(
+    runner: CliRunner,
+    arguments: list[str],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
     result = runner.invoke(main, arguments)
     assert result.exit_code == 2
-    assert "not configured yet" in result.output.lower()
+    assert "configuration file not found" in result.output.lower()
     assert "Traceback" not in result.output
     assert "\x1b[" not in result.output
 
@@ -541,3 +545,246 @@ def test_status_preflight_failures_prevent_requests(
     assert result.exit_code == expected, result.output
     assert "Traceback" not in result.output and "test-secret-123" not in result.output
     status_gateway.fetch_status.assert_not_called()
+
+
+@pytest.fixture
+def check_in_gateway(
+    status_gateway: AsyncMock, monkeypatch: pytest.MonkeyPatch
+) -> AsyncMock:
+    from hoyo_cli.commands import check_in
+    from hoyo_cli.models.common import CheckInReceipt, CheckInState
+
+    def create_gateway(credentials: Credentials) -> AsyncMock:
+        return status_gateway
+
+    monkeypatch.setattr(check_in, "GenshinPyGateway", create_gateway)
+    status_gateway.check_in_state.return_value = CheckInState(False)
+    status_gateway.claim_check_in.return_value = CheckInReceipt()
+    return status_gateway
+
+
+def test_checkin_all_prints_three_outcomes_without_confirmation_or_dashboard(
+    runner: CliRunner, check_in_gateway: AsyncMock, tmp_path: Path
+) -> None:
+    from hoyo_cli.models.common import CheckInReceipt, CheckInState
+
+    async def state(game: GameId, uid: int) -> CheckInState:
+        return CheckInState(game == "hsr")
+
+    async def claim(game: GameId, uid: int) -> CheckInReceipt:
+        return CheckInReceipt("20 Primogems" if game == "genshin" else None)
+
+    check_in_gateway.check_in_state.side_effect = state
+    check_in_gateway.claim_check_in.side_effect = claim
+    cache = tmp_path / "cache/untouched.json"
+    cache.parent.mkdir()
+    cache.write_bytes(b"prior cache bytes")
+    with (
+        patch("click.confirm", side_effect=AssertionError("No confirmation allowed")),
+        patch("click.prompt", side_effect=AssertionError("No input allowed")),
+        patch("hoyo_cli.cache.repository.read_eligible") as read,
+        patch("hoyo_cli.cache.repository.write_cache") as write,
+    ):
+        result = runner.invoke(main, ["check-in", "--no-color"])
+    assert result.exit_code == 0, result.output
+    names = ["Zenless Zone Zero", "Honkai: Star Rail", "Genshin Impact"]
+    assert [result.output.index(name) for name in names] == sorted(
+        result.output.index(name) for name in names
+    )
+    assert all(result.output.count(name) == 1 for name in names)
+    assert result.output.count("Claimed") == 2
+    assert result.output.count("Already checked in") == 1
+    assert result.output.count("20 Primogems") == 1
+    assert "main" in result.output
+    assert all(
+        text not in result.output
+        for text in (
+            "Resin",
+            "Trailblaze Power",
+            "Battery Charge",
+            "Updated",
+            "STALE",
+            "Traceback",
+            "test-secret-123",
+            "\x1b[",
+        )
+    )
+    check_in_gateway.fetch_status.assert_not_called()
+    assert check_in_gateway.check_in_state.await_args_list == [
+        call("zzz", 333333333),
+        call("hsr", 222222222),
+        call("genshin", 111111111),
+    ]
+    assert check_in_gateway.claim_check_in.await_count == 2
+    read.assert_not_called()
+    write.assert_not_called()
+    assert cache.read_bytes() == b"prior cache bytes"
+    assert list(cache.parent.iterdir()) == [cache]
+
+
+@pytest.mark.parametrize("placement", ["root", "local", "both"])
+def test_checkin_zzz_scope_and_exact_account_override(
+    runner: CliRunner, check_in_gateway: AsyncMock, tmp_path: Path, placement: str
+) -> None:
+    from hoyo_cli.commands import check_in
+
+    save_account(
+        tmp_path / ".hoyo/config.toml",
+        "alt",
+        AccountConfig("plaintext", {"zzz": GameSelection(True, 444444444)}),
+        make_default=False,
+        game_order=("zzz", "hsr", "genshin"),
+    )
+    PlaintextStore(tmp_path / ".hoyo/credentials.toml").put(
+        "alt", parse_cookie_header("ltuid=456; ltoken=other-test-secret")
+    )
+    arguments = ["check-in", "zzz"]
+    if placement == "root":
+        arguments = ["--account", "alt", "--no-color"] + arguments
+    elif placement == "local":
+        arguments += ["--account", "alt", "--no-color"]
+    else:
+        arguments = ["--account", "main", "--no-color"] + arguments
+        arguments += ["--account", "alt"]
+    with patch.object(
+        check_in, "GenshinPyGateway", return_value=check_in_gateway
+    ) as make:
+        result = runner.invoke(main, arguments)
+    assert result.exit_code == 0, result.output
+    assert make.call_args.args[0].fields["ltoken"] == "other-test-secret"
+    check_in_gateway.check_in_state.assert_awaited_once_with("zzz", 444444444)
+    check_in_gateway.claim_check_in.assert_awaited_once_with("zzz", 444444444)
+    assert "alt" in result.output and "Zenless Zone Zero" in result.output
+    assert (
+        "Genshin Impact" not in result.output
+        and "Honkai: Star Rail" not in result.output
+    )
+    assert "other-test-secret" not in result.output and "\x1b[" not in result.output
+
+
+@pytest.mark.parametrize(
+    "failure", [NetworkError("Request timed out."), RuntimeError("test-secret-123")]
+)
+def test_checkin_partial_failure_is_nonzero_but_prints_successes(
+    runner: CliRunner, check_in_gateway: AsyncMock, failure: Exception
+) -> None:
+    from hoyo_cli.models.common import CheckInReceipt
+
+    async def claim(game: GameId, uid: int) -> CheckInReceipt:
+        if game == "hsr":
+            raise failure
+        return CheckInReceipt()
+
+    check_in_gateway.claim_check_in.side_effect = claim
+    result = runner.invoke(main, ["check-in"])
+    assert result.exit_code == 1, result.output
+    assert result.output.count("Claimed") == 2
+    assert "Honkai: Star Rail" in result.output and "Failed" in result.output
+    assert "Traceback" not in result.output and "test-secret-123" not in result.output
+    assert check_in_gateway.claim_check_in.await_count == 3
+
+
+def test_checkin_already_checked_in_is_success(
+    runner: CliRunner, check_in_gateway: AsyncMock
+) -> None:
+    from hoyo_cli.models.common import CheckInState
+
+    check_in_gateway.check_in_state.return_value = CheckInState(True)
+    result = runner.invoke(main, ["check-in"])
+    assert result.exit_code == 0, result.output
+    assert result.output.count("Already checked in") == 3
+    check_in_gateway.claim_check_in.assert_not_called()
+
+
+def test_checkin_all_action_auth_failures_exit_1(
+    runner: CliRunner, check_in_gateway: AsyncMock
+) -> None:
+    from hoyo_cli.errors import AuthenticationError
+
+    check_in_gateway.check_in_state.side_effect = AuthenticationError(
+        "Session expired."
+    )
+    result = runner.invoke(main, ["check-in"])
+    assert result.exit_code == 1, result.output
+    assert result.output.count("Failed") == 3
+    assert result.output.count("Session expired.") == 3
+    check_in_gateway.claim_check_in.assert_not_called()
+
+
+def test_checkin_known_already_claimed_response_exits_0(
+    runner: CliRunner, check_in_gateway: AsyncMock
+) -> None:
+    from hoyo_cli.errors import AlreadyCheckedInError
+
+    check_in_gateway.claim_check_in.side_effect = AlreadyCheckedInError()
+    result = runner.invoke(main, ["check-in", "zzz"])
+    assert result.exit_code == 0, result.output
+    assert "Already checked in" in result.output
+    check_in_gateway.claim_check_in.assert_awaited_once_with("zzz", 333333333)
+
+
+def test_checkin_cancelled_operation_exits_cleanly(
+    runner: CliRunner, check_in_gateway: AsyncMock
+) -> None:
+    check_in_gateway.check_in_state.side_effect = asyncio.CancelledError
+    result = runner.invoke(main, ["check-in"])
+    assert result.exit_code == 1, result.output
+    assert "cancelled" in result.output
+    assert "Traceback" not in result.output
+    check_in_gateway.claim_check_in.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        "disabled",
+        "unconfigured",
+        "no-enabled",
+        "account",
+        "missing-credentials",
+        "malformed-credentials",
+        "missing-config",
+    ],
+)
+def test_checkin_preflight_failures_prevent_requests(
+    runner: CliRunner, check_in_gateway: AsyncMock, tmp_path: Path, case: str
+) -> None:
+    from hoyo_cli.commands import check_in
+    from hoyo_cli.errors import ConfigError, CredentialError
+
+    arguments = ["check-in", "hsr"]
+    expected = 2
+    if case in ("disabled", "unconfigured", "no-enabled"):
+        games: dict[GameId, GameSelection] = {
+            "genshin": GameSelection(case != "no-enabled", 111111111)
+        }
+        if case == "disabled":
+            games["hsr"] = GameSelection(False, 222222222)
+        save_account(
+            tmp_path / ".hoyo/config.toml",
+            "main",
+            AccountConfig("plaintext", games),
+            make_default=True,
+            game_order=(),
+        )
+        if case == "no-enabled":
+            arguments = ["check-in"]
+    elif case == "account":
+        arguments += ["--account", "ma"]
+    elif case in ("missing-credentials", "malformed-credentials"):
+        expected = 3
+    with (
+        patch.object(check_in, "open_store") as store,
+        patch.object(check_in, "load_config", wraps=check_in.load_config) as loader,
+    ):
+        if case == "missing-credentials":
+            store.return_value.get.return_value = None
+        elif case == "malformed-credentials":
+            store.side_effect = CredentialError("Invalid credential store.")
+        elif case == "missing-config":
+            loader.side_effect = ConfigError("Config missing; run hoyo init.")
+        result = runner.invoke(main, arguments)
+    assert result.exit_code == expected, result.output
+    assert "Traceback" not in result.output and "test-secret-123" not in result.output
+    check_in_gateway.check_in_state.assert_not_called()
+    check_in_gateway.claim_check_in.assert_not_called()

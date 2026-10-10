@@ -15,7 +15,7 @@ parsing, and offline developer tooling. Phase 2 adds typed config validation,
 safe configuration persistence, and working config inspection and editing.
 Phase 3 adds interactive account setup, HoYoLAB linked-character discovery,
 browser-cookie import, and explicit keyring or plaintext credential storage.
-Setup makes a read-only linked-account request; no command claims rewards yet.
+Setup makes a read-only linked-account request.
 
 Phase 4 adds immutable status snapshots, a bounded read-only HoYoLAB gateway,
 Genshin notes normalization, and compact/focused/detailed Rich views. The views
@@ -62,8 +62,24 @@ ineligible and are replaced by the next successful fresh fetch. Fresh snapshots
 record the time their request completes. Failed requests leave their previous
 cache bytes untouched.
 
-Check-in remains Phase 7 work and returns a concise
-"not configured yet" error with exit code `2`.
+Phase 7 adds explicit daily check-in through `hoyo check-in [game]`. Each game
+reads today's check-in state first and skips the claim if already checked in.
+Unclaimed games make one claim attempt; ambiguous claim failures are never
+retried automatically. Outcomes retain configured order and failures do not
+hide other games' results. Check-in exits `0` only when every requested game
+is claimed or already checked in, `1` for any action failure, and `2`/`3` for
+preflight configuration/credential failures. No additional confirmation is
+shown, and check-in does not fetch status or access its cache.
+
+The pinned library's HoYoLAB daily rewards are scoped to the authenticated
+account and game. The selected character UID is retained in its per-game
+selection, but the overseas daily endpoint has no character UID parameter.
+The claim endpoint does not return reward details, so the gateway reports
+`Claimed` without extra reward reads. This avoids reporting a confirmed claim
+as failed because a later reward lookup failed. A known already-claimed
+response also counts as success if another caller claimed after the state read.
+If a claim times out or loses its connection, the result warns that it may
+have completed; check today's state before trying again.
 
 ## Prerequisites
 
@@ -104,15 +120,15 @@ path setup instructions and open a new shell.
 
 ## Command grammar
 
-Help, version, account setup, status, config inspection, and config editing are
-functional. Check-in remains planned.
+Help, version, account setup, status, daily check-in, config inspection, and
+config editing are functional.
 
 | Command | Availability and behavior |
 | --- | --- |
 | `hoyo` or `hoyo status` | Available: concurrent overview of all enabled games |
 | `hoyo status <game>` | Available: focused status for `genshin`, `hsr`, or `zzz` |
 | `hoyo genshin`, `hoyo hsr`, `hoyo zzz` | Registered aliases for `hoyo status <game>` |
-| `hoyo check-in [game]` | Planned: explicit daily reward claim |
+| `hoyo check-in [game]` | Available: explicit daily reward claim for enabled games |
 | `hoyo init` | Available: interactive account setup or reconfiguration |
 | `hoyo config` | Available: inspect non-secret configuration |
 | `hoyo config --edit` | Available: open valid configuration in the selected editor |

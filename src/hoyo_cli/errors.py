@@ -23,7 +23,14 @@ class BackendUnavailable(CredentialError):
 
 
 class AuthenticationError(CredentialError):
-    """HoYoLAB rejected an authenticated read."""
+    """HoYoLAB rejected an authenticated request."""
+
+
+class AlreadyCheckedInError(AppError):
+    """HoYoLAB definitively reports that today's reward was already claimed."""
+
+    def __init__(self) -> None:
+        super().__init__("Already checked in.")
 
 
 class BrowserImportError(CredentialError):

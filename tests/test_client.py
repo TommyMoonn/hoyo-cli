@@ -1,4 +1,4 @@
-"""Request attempts, deadlines, cancellation and the read-only gateway boundary."""
+"""Request attempts, deadlines, cancellation and explicit mutation boundaries."""
 
 import asyncio
 import json
@@ -12,6 +12,8 @@ import pytest
 
 from hoyo_cli.auth.credentials import parse_cookie_header
 from hoyo_cli.errors import (
+    AlreadyCheckedInError,
+    AppError,
     AuthenticationError,
     ConfigError,
     NetworkError,
@@ -188,6 +190,202 @@ async def test_real_notes_method_never_enables_settings() -> None:
             await gateway.fetch_status("genshin", 111111111)
     assert read.await_count == 1
     mutate.assert_not_called()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "game, upstream_game",
+    [
+        ("genshin", genshin.Game.GENSHIN),
+        ("hsr", genshin.Game.STARRAIL),
+        ("zzz", genshin.Game.ZZZ),
+    ],
+)
+async def test_daily_gateway_maps_games_and_preserves_selected_uid(
+    game: GameId, upstream_game: genshin.Game
+) -> None:
+    client = AsyncMock()
+    client.uids = {}
+    client.get_reward_info.side_effect = [
+        genshin.models.DailyRewardInfo(False, 4),
+        genshin.models.DailyRewardInfo(True, 5),
+    ]
+    gateway = GenshinPyGateway(
+        parse_cookie_header("ltuid=123; ltoken=test-secret-123"), client=client
+    )
+    assert (await gateway.check_in_state(game, 111111111)).already_checked_in is False
+    assert (await gateway.check_in_state(game, 111111111)).already_checked_in is True
+    receipt = await gateway.claim_check_in(game, 111111111)
+    assert receipt.reward is None
+    assert client.uids == {upstream_game: 111111111}
+    assert client.get_reward_info.await_count == 2
+    client.get_reward_info.assert_awaited_with(game=upstream_game)
+    client.claim_daily_reward.assert_awaited_once_with(game=upstream_game, reward=False)
+    client.get_monthly_rewards.assert_not_called()
+    client.get_genshin_notes.assert_not_called()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "data",
+    [
+        None,
+        {"is_sign": False, "total_sign_day": 4},
+        genshin.models.DailyRewardInfo("false", 4),  # type: ignore[arg-type]
+        genshin.models.DailyRewardInfo(False, -1),
+    ],
+)
+async def test_malformed_daily_state_is_rejected_before_claim(data: object) -> None:
+    client = AsyncMock()
+    client.uids = {}
+    client.get_reward_info.return_value = data
+    gateway = GenshinPyGateway(
+        parse_cookie_header("ltuid=123; ltoken=test-secret-123"), client=client
+    )
+    with pytest.raises(UnsupportedDataError):
+        await gateway.check_in_state("genshin", 111111111)
+    client.get_reward_info.assert_awaited_once()
+    client.claim_daily_reward.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_daily_state_retries_transient_read_and_validates_uid() -> None:
+    client = AsyncMock()
+    client.uids = {}
+    client.get_reward_info.side_effect = [
+        TimeoutError("test-secret-123"),
+        genshin.models.DailyRewardInfo(False, 4),
+    ]
+    gateway = GenshinPyGateway(
+        parse_cookie_header("ltuid=123; ltoken=test-secret-123"), client=client
+    )
+    assert not (await gateway.check_in_state("zzz", 333333333)).already_checked_in
+    assert client.get_reward_info.await_count == 2
+    with pytest.raises(ConfigError):
+        await gateway.check_in_state("zzz", 0)
+    with pytest.raises(ConfigError):
+        await gateway.claim_check_in("zzz", 0)
+    client.claim_daily_reward.assert_not_called()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "error, expected",
+    [
+        (TimeoutError("test-secret-123"), NetworkError),
+        (aiohttp.ClientConnectionError("test-secret-123"), NetworkError),
+        (genshin.errors.GenshinException({"retcode": -1}), NetworkError),
+        (genshin.errors.InvalidCookies(msg="test-secret-123"), AuthenticationError),
+        (genshin.errors.AlreadyClaimed(), AlreadyCheckedInError),
+        (ValueError("test-secret-123"), UnsupportedDataError),
+    ],
+)
+async def test_claim_errors_are_classified_without_retry(
+    error: Exception, expected: type[AppError]
+) -> None:
+    client = AsyncMock()
+    client.uids = {}
+    client.claim_daily_reward.side_effect = error
+    gateway = GenshinPyGateway(
+        parse_cookie_header("ltuid=123; ltoken=test-secret-123"), client=client
+    )
+    with pytest.raises(expected) as caught:
+        await gateway.claim_check_in("hsr", 222222222)
+    assert "test-secret-123" not in caught.value.message
+    if expected is NetworkError:
+        assert "may have completed" in caught.value.message
+    client.claim_daily_reward.assert_awaited_once_with(
+        game=genshin.Game.STARRAIL, reward=False
+    )
+
+
+@pytest.mark.asyncio
+async def test_claim_timeout_cleans_up_without_retry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from hoyo_cli.hoyolab import client as client_module
+
+    monkeypatch.setattr(client_module, "REQUEST_TIMEOUT_SECONDS", 0.01)
+    client = AsyncMock()
+    client.uids = {}
+    cleaned: list[bool] = []
+
+    async def hang(**kwargs: object) -> None:
+        try:
+            await asyncio.Event().wait()
+        finally:
+            cleaned.append(True)
+
+    client.claim_daily_reward.side_effect = hang
+    gateway = GenshinPyGateway(
+        parse_cookie_header("ltuid=123; ltoken=test-secret-123"), client=client
+    )
+    with pytest.raises(NetworkError, match="may have completed"):
+        await asyncio.wait_for(gateway.claim_check_in("zzz", 333333333), timeout=1)
+    assert cleaned == [True]
+    client.claim_daily_reward.assert_awaited_once()
+    client.claim_daily_reward.side_effect = asyncio.CancelledError
+    with pytest.raises(asyncio.CancelledError):
+        await gateway.claim_check_in("zzz", 333333333)
+    assert client.claim_daily_reward.await_count == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "retcode, expected",
+    [
+        (0, None),
+        (-5003, AlreadyCheckedInError),
+        (-110, NetworkError),
+        (-1, NetworkError),
+        (-100, AuthenticationError),
+    ],
+)
+async def test_real_daily_transport_sends_one_post_and_closes_sessions(
+    retcode: int, expected: type[AppError] | None
+) -> None:
+    credentials = parse_cookie_header("ltuid=123; ltoken=test-secret-123")
+    client = create_client(credentials)
+    session = AsyncMock()
+    response = AsyncMock()
+    session.__aenter__.return_value = session
+    response.__aenter__.return_value = response
+    response.content_type = "application/json"
+    response.cookies = {}
+    response.json.return_value = {
+        "retcode": retcode,
+        "message": "test-secret-123",
+        "data": {},
+    }
+    session.request = Mock(return_value=response)
+    with patch.object(client.cookie_manager, "create_session", return_value=session):
+        gateway = GenshinPyGateway(credentials, client=client)
+        if expected is None:
+            assert (await gateway.claim_check_in("genshin", 111111111)).reward is None
+        else:
+            with pytest.raises(expected):
+                await gateway.claim_check_in("genshin", 111111111)
+    assert session.request.call_count == 1
+    assert session.request.call_args.args[0] == "POST"
+    assert "/sign" in str(session.request.call_args.args[1])
+    assert session.__aexit__.await_count == 1
+    assert response.__aexit__.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_claim_verification_challenge_is_actionable_and_not_retried() -> None:
+    client = AsyncMock()
+    client.uids = {}
+    client.claim_daily_reward.side_effect = genshin.errors.DailyGeetestTriggered(
+        {"retcode": 0}, gt="test-secret-123", challenge="test-secret-123"
+    )
+    gateway = GenshinPyGateway(
+        parse_cookie_header("ltuid=123; ltoken=test-secret-123"), client=client
+    )
+    with pytest.raises(AppError, match="verification") as caught:
+        await gateway.claim_check_in("genshin", 111111111)
+    assert "test-secret-123" not in caught.value.message
+    client.claim_daily_reward.assert_awaited_once()
 
 
 @pytest.mark.asyncio

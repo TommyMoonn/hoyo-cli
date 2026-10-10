@@ -8,10 +8,10 @@ import click
 
 from hoyo_cli.auth.credentials import open_store
 from hoyo_cli.commands import CommandOptions
-from hoyo_cli.config.models import enabled_games, resolve_account
+from hoyo_cli.config.models import resolve_account, resolve_games
 from hoyo_cli.config.paths import cache_root, config_path, credentials_path
 from hoyo_cli.config.repository import load_config
-from hoyo_cli.errors import AppError, ConfigError, CredentialError
+from hoyo_cli.errors import AppError, CredentialError
 from hoyo_cli.hoyolab.client import GenshinPyGateway
 from hoyo_cli.models.common import GameId
 from hoyo_cli.render.console import make_console
@@ -26,15 +26,7 @@ def _now() -> datetime:
 def run_status(*, options: CommandOptions, game: GameId | None) -> None:
     config = load_config(config_path())
     name, account = resolve_account(config, options.account)
-    if game is not None:
-        selection = account.games.get(game)
-        if selection is None or not selection.enabled:
-            raise ConfigError(
-                f"Game {game} is not enabled and configured for account {name}."
-            )
-        games = (game,)
-    else:
-        games = enabled_games(config, account)
+    games = resolve_games(config, account, game=game, account_name=name)
     credentials = open_store(account.credential_backend, credentials_path()).get(name)
     if credentials is None:
         raise CredentialError(f"No credentials for account {name}; run hoyo init.")

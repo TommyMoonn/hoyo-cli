@@ -165,3 +165,17 @@ def enabled_games(config: AppConfig, account: AccountConfig) -> tuple[GameId, ..
     if not games:
         raise ConfigError("The selected account has no enabled games.")
     return games
+
+
+def resolve_games(
+    config: AppConfig, account: AccountConfig, *, game: GameId | None, account_name: str
+) -> tuple[GameId, ...]:
+    """One enabled-game selection policy for status and explicit check-in."""
+    if game is None:
+        return enabled_games(config, account)
+    selection = account.games.get(game)
+    if selection is None or not selection.enabled:
+        raise ConfigError(
+            f"Game {game} is not enabled and configured for account {account_name}."
+        )
+    return (game,)
