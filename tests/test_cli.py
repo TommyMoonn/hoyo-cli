@@ -164,8 +164,6 @@ def test_root_help_lists_command_surface(runner: CliRunner) -> None:
         ["check-in"],
         ["check-in", "genshin"],
         ["init"],
-        ["config"],
-        ["config", "--edit"],
     ],
 )
 def test_unimplemented_commands_fail_cleanly(

@@ -6,9 +6,19 @@ from typing import TypeVar
 import click
 
 from hoyo_cli.commands import CommandOptions, check_in, config, init, status
+from hoyo_cli.errors import AppError
+from hoyo_cli.models.common import GAME_IDS, GameId
 
 _Callback = TypeVar("_Callback", bound=Callable[..., object])
-_GAME_NAMES = ("genshin", "hsr", "zzz")
+
+
+class _ApplicationGroup(click.Group):
+    def invoke(self, ctx: click.Context) -> object:
+        try:
+            return super().invoke(ctx)
+        except AppError as error:
+            click.echo(f"Error: {error.message}", err=True, color=False)
+            ctx.exit(error.exit_code)
 
 
 def _common_options(
@@ -45,7 +55,7 @@ def _resolve_options(
     )
 
 
-@click.group(name="hoyo", invoke_without_command=True)
+@click.group(name="hoyo", cls=_ApplicationGroup, invoke_without_command=True)
 @click.version_option(package_name="hoyo-cli", prog_name="hoyo")
 @_common_options(include_detailed=True)
 @click.pass_context
@@ -61,12 +71,12 @@ def main(
 
 
 @main.command(name="status")
-@click.argument("game", type=click.Choice(_GAME_NAMES), required=False)
+@click.argument("game", type=click.Choice(GAME_IDS), required=False)
 @_common_options(include_detailed=True)
 @click.pass_context
 def status_command(
     ctx: click.Context,
-    game: str | None,
+    game: GameId | None,
     account: str | None,
     detailed: bool,
     no_color: bool,
@@ -80,7 +90,7 @@ def status_command(
     )
 
 
-def _game_alias(game: str) -> click.Command:
+def _game_alias(game: GameId) -> click.Command:
     @click.command(name=game, help=f"Alias for 'hoyo status {game}'.")
     @_common_options(include_detailed=True)
     @click.pass_context
@@ -98,16 +108,16 @@ def _game_alias(game: str) -> click.Command:
     return alias
 
 
-for _game in _GAME_NAMES:
+for _game in GAME_IDS:
     main.add_command(_game_alias(_game))
 
 
 @main.command(name="check-in")
-@click.argument("game", type=click.Choice(_GAME_NAMES), required=False)
+@click.argument("game", type=click.Choice(GAME_IDS), required=False)
 @_common_options()
 @click.pass_context
 def check_in_command(
-    ctx: click.Context, game: str | None, account: str | None, no_color: bool
+    ctx: click.Context, game: GameId | None, account: str | None, no_color: bool
 ) -> None:
     """Explicitly claim daily rewards for all enabled games, or GAME."""
     check_in.run_check_in(

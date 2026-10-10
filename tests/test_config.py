@@ -1,0 +1,700 @@
+"""Offline configuration schema and account-selection tests."""
+
+import os
+from collections.abc import MutableMapping
+from dataclasses import FrozenInstanceError, replace
+from pathlib import Path
+from subprocess import CompletedProcess, list2cmdline
+from typing import cast
+from unittest.mock import patch
+
+import pytest
+import tomlkit
+from click.testing import CliRunner
+from tomlkit.toml_document import TOMLDocument
+
+from hoyo_cli.cli import main
+from hoyo_cli.commands.config import edit_config, show_config
+from hoyo_cli.config.models import (
+    AccountConfig,
+    GameSelection,
+    enabled_games,
+    parse_config,
+    resolve_account,
+)
+from hoyo_cli.config.paths import cache_root, config_path, credentials_path
+from hoyo_cli.config.repository import load_config, save_account
+from hoyo_cli.errors import ConfigError
+from hoyo_cli.models.common import GameId
+
+
+def test_save_refuses_detected_symlink_before_io(tmp_path: Path) -> None:
+    path = tmp_path / "config.toml"
+    account = AccountConfig("keyring", {"genshin": GameSelection(True, 111111111)})
+    with patch.object(Path, "is_symlink", return_value=True):
+        with pytest.raises(ConfigError, match="symbolic link"):
+            save_account(path, "main", account, make_default=True, game_order=())
+    assert not path.exists()
+
+
+@pytest.mark.parametrize("dangling", [False, True])
+def test_save_refuses_symlink_without_changing_target(
+    tmp_path: Path, config_document: TOMLDocument, dangling: bool
+) -> None:
+    target = tmp_path / "managed.toml"
+    original = tomlkit.dumps(config_document).encode()
+    if not dangling:
+        target.write_bytes(original)
+    path = tmp_path / "config.toml"
+    try:
+        path.symlink_to(target)
+    except OSError as error:
+        pytest.skip(f"Symlink creation is unavailable: {error}")
+    account = parse_config(config_document).accounts["main"]
+    with pytest.raises(ConfigError, match="symbolic link"):
+        save_account(path, "main", account, make_default=True, game_order=())
+    assert path.is_symlink()
+    assert target.read_bytes() == original if not dangling else not target.exists()
+    assert not list(tmp_path.glob("*.tmp"))
+
+
+@pytest.fixture
+def config_document() -> TOMLDocument:
+    return tomlkit.parse(
+        """# Keep this comment
+version = 1
+default_account = "main"
+game_order = ["zzz", "genshin"]
+unknown_root = "private-marker"
+
+[display]
+color = "auto"
+unknown_display = "keep"
+
+[accounts.main]
+credential_backend = "keyring" # backend comment
+unknown_account = "private-marker"
+
+[accounts.main.games.genshin]
+enabled = true
+uid = 111111111 # UID comment
+unknown_game = "keep"
+
+[accounts.main.games.hsr]
+enabled = true
+uid = 222222222
+
+[accounts.main.games.zzz]
+enabled = false
+uid = 333333333
+
+[accounts.alt]
+credential_backend = "plaintext"
+
+[accounts.alt.games.zzz]
+enabled = true
+uid = 444444444
+"""
+    )
+
+
+def test_v1_example_parses(config_document: TOMLDocument) -> None:
+    config = parse_config(config_document)
+    assert config.version == 1
+    assert config.default_account == "main"
+    assert config.game_order == ("zzz", "genshin")
+    assert config.display_color == "auto"
+    assert config.accounts["main"].games["hsr"].uid == 222222222
+    assert config.accounts["alt"].credential_backend == "plaintext"
+
+
+def test_exact_account_match(config_document: TOMLDocument) -> None:
+    config = parse_config(config_document)
+    assert resolve_account(config, "alt") == ("alt", config.accounts["alt"])
+    assert resolve_account(config, None)[0] == "main"
+    for requested in ("a", "Alt", " main", "unknown"):
+        with pytest.raises(ConfigError):
+            resolve_account(config, requested)
+
+
+def test_missing_default_does_not_fall_back(config_document: TOMLDocument) -> None:
+    config_document["default_account"] = "missing"
+    with pytest.raises(ConfigError, match="default_account"):
+        parse_config(config_document)
+
+
+def test_game_order_appends_enabled_unlisted_games(
+    config_document: TOMLDocument,
+) -> None:
+    config = parse_config(config_document)
+    assert enabled_games(config, config.accounts["main"]) == ("genshin", "hsr")
+    config_document["game_order"] = []
+    config_document["accounts"]["main"]["games"]["zzz"]["enabled"] = True
+    config = parse_config(config_document)
+    assert enabled_games(config, config.accounts["main"]) == ("genshin", "hsr", "zzz")
+
+
+@pytest.mark.parametrize("order", [["hsr", "hsr"], ["unknown"], [True], "genshin"])
+def test_duplicate_or_unknown_game_order_fails(
+    config_document: TOMLDocument, order: object
+) -> None:
+    config_document["game_order"] = order
+    with pytest.raises(ConfigError, match="game_order"):
+        parse_config(config_document)
+
+
+@pytest.mark.parametrize("uid", ["private-marker", True, 0, -1, 1.5])
+def test_bad_uid_reports_field_path(config_document: TOMLDocument, uid: object) -> None:
+    config_document["accounts"]["main"]["games"]["hsr"]["uid"] = uid
+    with pytest.raises(ConfigError, match=r"accounts.main.games.hsr.uid") as caught:
+        parse_config(config_document)
+    assert caught.value.exit_code == 2
+    assert "private-marker" not in str(caught.value)
+
+
+def test_no_enabled_games_is_error(config_document: TOMLDocument) -> None:
+    for game in ("genshin", "hsr", "zzz"):
+        config_document["accounts"]["main"]["games"][game]["enabled"] = False
+    config = parse_config(config_document)
+    with pytest.raises(ConfigError, match="enabled games"):
+        enabled_games(config, config.accounts["main"])
+
+
+@pytest.mark.parametrize(
+    ("key", "value"),
+    [
+        ("version", True),
+        ("version", 2),
+        ("default_account", ""),
+        ("default_account", 1),
+        ("accounts", []),
+        ("display", "private-marker"),
+    ],
+)
+def test_invalid_root_fields_are_classified(
+    config_document: TOMLDocument, key: str, value: object
+) -> None:
+    config_document[key] = value
+    with pytest.raises(ConfigError, match=key):
+        parse_config(config_document)
+
+
+@pytest.mark.parametrize(
+    "key", ["version", "default_account", "game_order", "display", "accounts"]
+)
+def test_missing_required_fields(config_document: TOMLDocument, key: str) -> None:
+    del config_document[key]
+    with pytest.raises(ConfigError, match=key):
+        parse_config(config_document)
+
+
+@pytest.mark.parametrize(
+    ("section", "field", "value"),
+    [
+        ("display", "color", "private-marker"),
+        ("account", "credential_backend", "private-marker"),
+        ("game", "enabled", "yes"),
+        ("game", "enabled", 1),
+    ],
+)
+def test_nested_fields_are_validated(
+    config_document: TOMLDocument, section: str, field: str, value: object
+) -> None:
+    table = config_document["display"]
+    if section == "account":
+        table = config_document["accounts"]["main"]
+    elif section == "game":
+        table = config_document["accounts"]["main"]["games"]["hsr"]
+    table[field] = value
+    with pytest.raises(ConfigError, match=field) as caught:
+        parse_config(config_document)
+    assert "private-marker" not in str(caught.value)
+
+
+def test_config_models_are_immutable(config_document: TOMLDocument) -> None:
+    config = parse_config(config_document)
+    with pytest.raises(FrozenInstanceError):
+        config.__setattr__("version", 2)
+    with pytest.raises(TypeError):
+        cast(MutableMapping[str, AccountConfig], config.accounts)["other"] = (
+            config.accounts["main"]
+        )
+    with pytest.raises(TypeError):
+        cast(MutableMapping[GameId, GameSelection], config.accounts["main"].games)[
+            "zzz"
+        ] = config.accounts["main"].games["hsr"]
+
+
+def test_config_paths_use_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    assert config_path() == tmp_path / ".hoyo" / "config.toml"
+    assert credentials_path() == tmp_path / ".hoyo" / "credentials.toml"
+    assert config_path(tmp_path / "other") == tmp_path / "other/.hoyo/config.toml"
+    assert not (tmp_path / ".hoyo").exists()
+
+
+def test_cache_path_uses_platformdirs(tmp_path: Path) -> None:
+    with patch(
+        "hoyo_cli.config.paths.platformdirs.user_cache_path", return_value=tmp_path
+    ) as lookup:
+        assert cache_root() == tmp_path
+    lookup.assert_called_once_with("hoyo", appauthor=False)
+
+
+def test_round_trip_preserves_comments_unknown_keys_and_order(
+    tmp_path: Path, config_document: TOMLDocument
+) -> None:
+    path = tmp_path / "config.toml"
+    original = tomlkit.dumps(config_document)
+    path.write_text(original, encoding="utf-8")
+    account = AccountConfig(
+        "plaintext",
+        {
+            "genshin": GameSelection(False, 999999999),
+            "hsr": GameSelection(True, 222222222),
+        },
+    )
+    save_account(path, "main", account, make_default=False, game_order=("hsr",))
+    updated = path.read_text(encoding="utf-8")
+    assert "# Keep this comment" in updated
+    assert "# backend comment" in updated
+    assert "# UID comment" in updated
+    assert original[original.index("[accounts.alt]") :] in updated
+    document = tomlkit.parse(updated)
+    assert document["unknown_root"] == "private-marker"
+    assert document["display"]["unknown_display"] == "keep"
+    assert document["accounts"]["main"]["unknown_account"] == "private-marker"
+    assert document["accounts"]["main"]["games"]["genshin"]["unknown_game"] == "keep"
+    assert updated.index("[accounts.main]") < updated.index("[accounts.alt]")
+    config = load_config(path)
+    assert config.accounts["main"].games["genshin"].uid == 999999999
+    assert config.accounts["alt"].games["zzz"].uid == 444444444
+    assert config.game_order == ("hsr",)
+
+
+@pytest.mark.parametrize(
+    "invalid", ["version = [", 'version = 2\nsecret = "private-marker"']
+)
+def test_invalid_existing_config_is_not_rewritten(
+    tmp_path: Path, config_document: TOMLDocument, invalid: str
+) -> None:
+    path = tmp_path / "config.toml"
+    original = invalid.encode("utf-8")
+    path.write_bytes(original)
+    with pytest.raises(ConfigError):
+        save_account(
+            path,
+            "main",
+            parse_config(config_document).accounts["main"],
+            make_default=True,
+            game_order=("hsr",),
+        )
+    assert path.read_bytes() == original
+    assert list(tmp_path.iterdir()) == [path]
+
+
+@pytest.mark.parametrize("operation", ["replace", "fsync"])
+def test_write_interruption_preserves_original_bytes(
+    tmp_path: Path, config_document: TOMLDocument, operation: str
+) -> None:
+    path = tmp_path / "config.toml"
+    original = tomlkit.dumps(config_document).encode("utf-8")
+    path.write_bytes(original)
+    with patch(
+        f"hoyo_cli.config.repository.os.{operation}",
+        side_effect=OSError("private-marker"),
+    ):
+        with pytest.raises(ConfigError) as caught:
+            save_account(
+                path,
+                "main",
+                parse_config(config_document).accounts["main"],
+                make_default=True,
+                game_order=("hsr",),
+            )
+    assert "private-marker" not in str(caught.value)
+    assert path.read_bytes() == original
+    assert list(tmp_path.iterdir()) == [path]
+
+
+def test_new_config_creates_only_non_secret_fields(tmp_path: Path) -> None:
+    path = tmp_path / ".hoyo/config.toml"
+    account = AccountConfig("keyring", {"genshin": GameSelection(True, 111111111)})
+    save_account(path, "Main.Exact", account, make_default=False, game_order=())
+    config = load_config(path)
+    assert config.default_account == "Main.Exact"
+    assert config.accounts["Main.Exact"] == account
+    assert config.display_color == "auto"
+    assert enabled_games(config, account) == ("genshin",)
+    assert not credentials_path(tmp_path).exists()
+
+
+def test_save_invalid_new_account_preserves_original(
+    tmp_path: Path, config_document: TOMLDocument
+) -> None:
+    path = tmp_path / "config.toml"
+    original = tomlkit.dumps(config_document).encode("utf-8")
+    path.write_bytes(original)
+    account = AccountConfig("keyring", {"genshin": GameSelection(True, 0)})
+    with pytest.raises(ConfigError):
+        save_account(path, "main", account, make_default=True, game_order=("genshin",))
+    assert path.read_bytes() == original
+
+
+def test_read_never_appends_missing_order_to_file(
+    tmp_path: Path, config_document: TOMLDocument
+) -> None:
+    path = tmp_path / "config.toml"
+    original = tomlkit.dumps(config_document).replace("\n", "\r\n").encode("utf-8")
+    path.write_bytes(original)
+    config = load_config(path)
+    assert enabled_games(config, config.accounts["main"]) == ("genshin", "hsr")
+    assert path.read_bytes() == original
+
+
+@pytest.mark.parametrize("content", [None, b'bad = [ "private-marker"', b"\xff\xfe"])
+def test_load_failures_report_path_without_raw_values(
+    tmp_path: Path, content: bytes | None
+) -> None:
+    path = tmp_path / "config.toml"
+    if content is not None:
+        path.write_bytes(content)
+    with pytest.raises(ConfigError) as caught:
+        load_config(path)
+    assert str(path) in str(caught.value)
+    assert "private-marker" not in str(caught.value)
+
+
+def test_config_shows_paths_names_and_uids_not_secrets(
+    tmp_path: Path, config_document: TOMLDocument
+) -> None:
+    config_document["accounts"]["main"]["ltoken"] = "private-marker"
+    config_document["display"]["secret"] = "private-marker"
+    output = show_config(parse_config(config_document), tmp_path / "config.toml")
+    for expected in (
+        str(tmp_path / "config.toml"),
+        "main",
+        "alt",
+        "keyring",
+        "plaintext",
+        "111111111",
+        "222222222",
+        "444444444",
+        "zzz, genshin",
+    ):
+        assert expected in output
+    assert "private-marker" not in output
+    assert "ltoken" not in output
+    assert "333333333" not in output  # Disabled game UIDs are not shown as enabled.
+
+
+def test_config_edit_invokes_selected_editor(tmp_path: Path) -> None:
+    path = tmp_path / "config with spaces.toml"
+    path.write_text("version = 1", encoding="utf-8")
+    with patch(
+        "hoyo_cli.commands.config.subprocess.run", return_value=CompletedProcess([], 0)
+    ) as launch:
+        assert edit_config(path, 'fake-editor --wait --title "two words"') == 0
+    launch.assert_called_once_with(
+        ["fake-editor", "--wait", "--title", "two words", str(path)],
+        check=False,
+        shell=False,
+    )
+
+
+def test_config_edit_without_editor_reports_path(tmp_path: Path) -> None:
+    path = tmp_path / "config.toml"
+    with pytest.raises(ConfigError) as caught:
+        edit_config(path, None)
+    assert str(path) in str(caught.value)
+    assert "VISUAL" in str(caught.value)
+    assert "EDITOR" in str(caught.value)
+
+
+def test_editor_launch_error_is_classified(tmp_path: Path) -> None:
+    path = tmp_path / "config.toml"
+    path.write_text("version = 1", encoding="utf-8")
+    with patch(
+        "hoyo_cli.commands.config.subprocess.run",
+        side_effect=FileNotFoundError("private-marker"),
+    ):
+        with pytest.raises(ConfigError) as caught:
+            edit_config(path, "missing-editor")
+    assert str(path) in str(caught.value)
+    assert "private-marker" not in str(caught.value)
+
+
+def test_editor_shell_metacharacters_remain_arguments(tmp_path: Path) -> None:
+    path = tmp_path / "config.toml"
+    with patch(
+        "hoyo_cli.commands.config.subprocess.run", return_value=CompletedProcess([], 0)
+    ) as launch:
+        edit_config(path, "fake-editor ; other-command")
+    assert launch.call_args.args[0] == ["fake-editor", ";", "other-command", str(path)]
+    assert launch.call_args.kwargs["shell"] is False
+
+
+def test_config_cli_reads_only_config(
+    runner: CliRunner, tmp_path: Path, config_document: TOMLDocument
+) -> None:
+    path = tmp_path / "config.toml"
+    path.write_text(tomlkit.dumps(config_document), encoding="utf-8")
+    secrets = tmp_path / "credentials.toml"
+    secrets.write_text('ltoken = "private-marker"', encoding="utf-8")
+    original = path.read_bytes()
+    original_open = Path.open
+    with (
+        patch("hoyo_cli.commands.config.config_path", return_value=path),
+        patch("pathlib.Path.open", autospec=True, side_effect=original_open) as reads,
+    ):
+        result = runner.invoke(main, ["config", "--no-color"])
+    reads.assert_called_once_with(path, "r", encoding="utf-8", newline="")
+    assert result.exit_code == 0, result.output
+    assert "main" in result.output
+    assert "444444444" in result.output
+    assert "private-marker" not in result.output
+    assert "\x1b[" not in result.output
+    assert path.read_bytes() == original
+
+
+def test_config_cli_checks_exact_account(
+    runner: CliRunner, tmp_path: Path, config_document: TOMLDocument
+) -> None:
+    path = tmp_path / "config.toml"
+    path.write_text(tomlkit.dumps(config_document), encoding="utf-8")
+    with patch("hoyo_cli.commands.config.config_path", return_value=path):
+        valid = runner.invoke(main, ["--account", "alt", "config"])
+        invalid = runner.invoke(main, ["config", "--account", "a"])
+    assert valid.exit_code == 0
+    assert invalid.exit_code == 2
+    assert "--account" in invalid.output
+    assert "Traceback" not in invalid.output
+
+
+def test_invalid_config_exits_2_without_traceback(
+    runner: CliRunner, tmp_path: Path
+) -> None:
+    path = tmp_path / "config.toml"
+    path.write_text('private = [ "private-marker"', encoding="utf-8")
+    original = path.read_bytes()
+    with patch("hoyo_cli.commands.config.config_path", return_value=path):
+        result = runner.invoke(main, ["config"])
+    assert result.exit_code == 2
+    assert str(path) in result.output
+    assert "private-marker" not in result.output
+    assert "Traceback" not in result.output
+    assert path.read_bytes() == original
+
+
+def test_config_cli_editor_precedence(
+    runner: CliRunner,
+    tmp_path: Path,
+    config_document: TOMLDocument,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "config.toml"
+    path.write_text(tomlkit.dumps(config_document), encoding="utf-8")
+    monkeypatch.setenv("VISUAL", "visual-editor --wait")
+    monkeypatch.setenv("EDITOR", "secondary-editor")
+    with (
+        patch("hoyo_cli.commands.config.config_path", return_value=path),
+        patch(
+            "hoyo_cli.commands.config.subprocess.run",
+            return_value=CompletedProcess([], 0),
+        ) as launch,
+    ):
+        result = runner.invoke(main, ["config", "--edit"])
+    assert result.exit_code == 0, result.output
+    assert launch.call_args.args[0] == ["visual-editor", "--wait", str(path)]
+
+
+def test_config_cli_no_editor_is_actionable(
+    runner: CliRunner,
+    tmp_path: Path,
+    config_document: TOMLDocument,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "config.toml"
+    path.write_text(tomlkit.dumps(config_document), encoding="utf-8")
+    monkeypatch.delenv("VISUAL", raising=False)
+    monkeypatch.delenv("EDITOR", raising=False)
+    with patch("hoyo_cli.commands.config.config_path", return_value=path):
+        result = runner.invoke(main, ["config", "--edit"])
+    assert result.exit_code == 2
+    assert str(path) in result.output
+    assert "VISUAL" in result.output
+    assert "Traceback" not in result.output
+
+
+def test_resolver_never_substitutes_another_default(
+    config_document: TOMLDocument,
+) -> None:
+    config = replace(parse_config(config_document), default_account="missing")
+    with pytest.raises(ConfigError, match="default_account"):
+        resolve_account(config, None)
+    assert resolve_account(config, "alt")[0] == "alt"
+
+
+def test_unknown_game_configuration_is_rejected(config_document: TOMLDocument) -> None:
+    config_document["accounts"]["main"]["games"]["unknown"] = {
+        "enabled": True,
+        "uid": 1,
+    }
+    with pytest.raises(ConfigError, match=r"accounts.main.games"):
+        parse_config(config_document)
+
+
+def test_model_snapshots_do_not_retain_mutable_inputs(
+    config_document: TOMLDocument,
+) -> None:
+    games: dict[GameId, GameSelection] = {"genshin": GameSelection(True, 111111111)}
+    account = AccountConfig("keyring", games)
+    games.clear()
+    assert "genshin" in account.games
+    accounts = {"main": account}
+    config = replace(parse_config(config_document), accounts=accounts)
+    accounts.clear()
+    assert "main" in config.accounts
+
+
+def test_noop_save_preserves_line_endings_and_formatting(
+    tmp_path: Path, config_document: TOMLDocument
+) -> None:
+    path = tmp_path / "config.toml"
+    original = tomlkit.dumps(config_document).replace("\n", "\r\n").encode("utf-8")
+    path.write_bytes(original)
+    config = load_config(path)
+    save_account(
+        path,
+        "main",
+        config.accounts["main"],
+        make_default=False,
+        game_order=config.game_order,
+    )
+    assert path.read_bytes() == original
+
+
+def test_replace_uses_a_closed_same_directory_temporary_file(
+    tmp_path: Path, config_document: TOMLDocument
+) -> None:
+    path = tmp_path / "config.toml"
+    path.write_text(tomlkit.dumps(config_document), encoding="utf-8")
+    with patch(
+        "hoyo_cli.config.repository.os.replace", wraps=os.replace
+    ) as replace_file:
+        save_account(
+            path,
+            "alt",
+            parse_config(config_document).accounts["alt"],
+            make_default=True,
+            game_order=("zzz",),
+        )
+    source, destination = replace_file.call_args.args
+    assert source.parent == destination.parent == tmp_path
+    assert not source.exists()
+    assert load_config(path).default_account == "alt"
+
+
+@pytest.mark.parametrize("uid", [True, 1.0])
+def test_save_rejects_same_value_with_wrong_type(
+    tmp_path: Path, config_document: TOMLDocument, uid: object
+) -> None:
+    config_document["accounts"]["main"]["games"]["genshin"]["uid"] = 1
+    path = tmp_path / "config.toml"
+    original = tomlkit.dumps(config_document).encode("utf-8")
+    path.write_bytes(original)
+    account = AccountConfig("keyring", {"genshin": GameSelection(True, cast(int, uid))})
+    with pytest.raises(ConfigError, match="uid"):
+        save_account(path, "main", account, make_default=False, game_order=("genshin",))
+    assert path.read_bytes() == original
+
+
+def test_inspection_handles_accounts_with_no_enabled_games(
+    config_document: TOMLDocument, tmp_path: Path
+) -> None:
+    for game in ("genshin", "hsr", "zzz"):
+        config_document["accounts"]["main"]["games"][game]["enabled"] = False
+    output = show_config(parse_config(config_document), tmp_path / "config.toml")
+    assert "Account: main" in output
+    assert "No enabled games" in output
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Native Windows command-line parsing")
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        [r"C:\Tools\editor.exe", "--wait"],
+        [
+            r"C:\Program Files\Editor\editor.exe",
+            "--title=two words",
+            'quoted"argument',
+            "path with trailing \\",
+        ],
+    ],
+)
+def test_windows_editor_quotes_and_backslashes(
+    tmp_path: Path, arguments: list[str]
+) -> None:
+    path = tmp_path / "config file.toml"
+    with patch(
+        "hoyo_cli.commands.config.subprocess.run", return_value=CompletedProcess([], 0)
+    ) as launch:
+        edit_config(path, list2cmdline(arguments))
+    assert launch.call_args.args[0] == [*arguments, str(path)]
+
+
+def test_posix_editor_quoting_uses_an_argument_vector(tmp_path: Path) -> None:
+    path = tmp_path / "config.toml"
+    with (
+        patch("hoyo_cli.commands.config.os.name", "posix"),
+        patch(
+            "hoyo_cli.commands.config.subprocess.run",
+            return_value=CompletedProcess([], 0),
+        ) as launch,
+    ):
+        edit_config(path, "'editor path' --title='two words'")
+    assert launch.call_args.args[0] == ["editor path", "--title=two words", str(path)]
+
+
+def test_invalid_editor_command_does_not_launch(tmp_path: Path) -> None:
+    with patch("hoyo_cli.commands.config.subprocess.run") as launch:
+        with pytest.raises(ConfigError):
+            edit_config(tmp_path / "config.toml", "editor\0secret")
+    launch.assert_not_called()
+
+
+def test_editor_nonzero_exit_is_a_clean_command_failure(
+    runner: CliRunner,
+    tmp_path: Path,
+    config_document: TOMLDocument,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "config.toml"
+    path.write_text(tomlkit.dumps(config_document), encoding="utf-8")
+    monkeypatch.setenv("VISUAL", "fake-editor")
+    with (
+        patch("hoyo_cli.commands.config.config_path", return_value=path),
+        patch(
+            "hoyo_cli.commands.config.subprocess.run",
+            return_value=CompletedProcess([], 9),
+        ),
+    ):
+        result = runner.invoke(main, ["config", "--edit"])
+    assert result.exit_code == 1
+    assert "status 9" in result.output
+    assert str(path) in result.output
+    assert "Traceback" not in result.output
+
+
+def test_invalid_config_is_not_sent_to_editor(
+    runner: CliRunner, tmp_path: Path
+) -> None:
+    path = tmp_path / "config.toml"
+    path.write_text("version = [", encoding="utf-8")
+    with (
+        patch("hoyo_cli.commands.config.config_path", return_value=path),
+        patch("hoyo_cli.commands.config.subprocess.run") as launch,
+    ):
+        result = runner.invoke(main, ["config", "--edit"])
+    assert result.exit_code == 2
+    launch.assert_not_called()
