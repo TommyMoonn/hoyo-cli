@@ -585,7 +585,7 @@ class FakeIO:
             return self.backend
         if prompt == "Login source":
             return choices[1] if self.browser else choices[0]
-        if prompt == "HoYoLAB session":
+        if prompt == "Browser source":
             return choices[1] if self.browser else "Enter ltuid_v2 / ltoken_v2 manually"
         if prompt == "Browser recovery":
             return "Enter ltuid_v2 / ltoken_v2 manually"
@@ -675,7 +675,7 @@ def test_selected_browser_failure_recovers_without_restarting_account(
             if prompt == "Browser recovery":
                 return recovery
             if (
-                prompt == "HoYoLAB session"
+                prompt == "Browser source"
                 and recovery == "Choose another browser/profile"
             ):
                 return choices[0] if len(browser.imported) else choices[1]
@@ -734,7 +734,7 @@ def test_switch_profile_after_rejected_session_uses_new_credentials(
 
     class ProfilesIO(FakeIO):
         def choose(self, prompt: str, choices: Sequence[str]) -> str:
-            if prompt == "HoYoLAB session":
+            if prompt == "Browser source":
                 return choices[0]
             if prompt == "Browser profile":
                 return choices[1] if browser.imported else choices[0]
@@ -969,7 +969,7 @@ def test_existing_credentials_not_silently_replaced(tmp_path: Path) -> None:
     assert (config.read_bytes(), secrets.read_bytes()) == original
 
 
-@pytest.mark.parametrize("cancel", ["Profile", "HoYoLAB session", "Save"])
+@pytest.mark.parametrize("cancel", ["Profile", "Browser source", "Save"])
 def test_cancel_leaves_no_files(tmp_path: Path, cancel: str) -> None:
     config, secrets = tmp_path / "config.toml", tmp_path / "credentials.toml"
     browser = FakeBrowser()
@@ -982,7 +982,7 @@ def test_cancel_leaves_no_files(tmp_path: Path, cancel: str) -> None:
             FakeDiscovery(),
         )
     assert not config.exists() and not secrets.exists()
-    if cancel == "HoYoLAB session":
+    if cancel == "Browser source":
         assert not browser.imported
 
 

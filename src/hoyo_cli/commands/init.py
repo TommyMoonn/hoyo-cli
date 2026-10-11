@@ -173,15 +173,22 @@ def _observed_work(
 
 
 def _browser_profile(io: SetupIO, browser: BrowserImporter) -> BrowserProfile | None:
+    presenter = SetupPresenter(no_color=True)
     sessions = browser.list_sessions()
     choices = [session.browser_label for session in sessions]
     if not sessions:
-        click.echo(
+        presenter.message(
             "No supported browser sources are available. "
             "Enter ltuid_v2 / ltoken_v2 manually."
         )
         return None
-    selected = choose_setup_option(io, "HoYoLAB session", (*choices, _MANUAL_ENTRY))
+    if not any(session.supports_profiles for session in sessions):
+        presenter.message(
+            "Browser/profile selection not available on this platform. "
+            "The library chooses a profile; installed profiles and HoYoLAB "
+            "login state have not been checked. Manual two-field entry is recommended.",
+        )
+    selected = choose_setup_option(io, "Browser source", (*choices, _MANUAL_ENTRY))
     if selected == _MANUAL_ENTRY:
         return None
     session = sessions[choices.index(selected)]
@@ -189,15 +196,12 @@ def _browser_profile(io: SetupIO, browser: BrowserImporter) -> BrowserProfile | 
     if not profiles:
         raise browser_error(ErrorCode.BROWSER_PROFILE_MISSING)
     if not session.supports_profiles:
-        click.echo(
-            "Profile selection is unavailable for this source on this platform. "
-            "The reader selects a profile; manual ltuid_v2 / ltoken_v2 "
-            "entry is available.",
-            color=False,
-        )
         return profiles[0]
+    presenter.message("Located browser profiles, not verified HoYoLAB sessions.")
     # Tokens disambiguate equal profile names without displaying private paths.
-    profile_choices = [f"{p.label} [{p.source_id}]" for p in profiles]
+    profile_choices = [
+        f"{p.label} [{p.source_id.split(':')[-1][:8]}]" for p in profiles
+    ]
     selected = choose_setup_option(
         io, "Browser profile", (*profile_choices, _MANUAL_ENTRY)
     )
@@ -311,7 +315,12 @@ def _session_recovery(
     has_credentials: bool,
     failure_code: ErrorCode | None = None,
 ) -> str:
-    if use_browser and failure_code == ErrorCode.BROWSER_ENCRYPTION_UNSUPPORTED:
+    if use_browser and failure_code in (
+        ErrorCode.BROWSER_ENCRYPTION_UNSUPPORTED,
+        ErrorCode.BROWSER_DECRYPTION,
+        ErrorCode.BROWSER_UNSUPPORTED,
+        ErrorCode.BROWSER_PROFILE_MISSING,
+    ):
         choices = (_MANUAL_RECOMMENDED, "Choose another browser/profile")
     elif use_browser:
         retry = (

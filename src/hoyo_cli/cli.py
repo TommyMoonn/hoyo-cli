@@ -231,6 +231,11 @@ def init_command(ctx: click.Context, no_color: bool) -> None:
     one, and hoyo config order to change global game order.
     Choose an optional Editor preference at first-run review, or later with
     hoyo config editor.
+
+    Manual ltuid_v2 / ltoken_v2 entry is recommended. Browser import is optional:
+    it may require closing the browser and can fail with protected encryption.
+    Windows offers discovered profiles; macOS/Linux use a library-selected
+    profile with no installation or login-state guarantee.
     """
     init.configure_profile(
         options=_resolve_options(ctx, profile=None, no_color=no_color)

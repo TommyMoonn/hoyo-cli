@@ -5,6 +5,7 @@ selected reader runs in a child process to contain dependency diagnostics.
 """
 
 import configparser
+import hashlib
 import json
 import os
 import sqlite3
@@ -13,13 +14,31 @@ import sys
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Protocol, cast
+from types import MappingProxyType
+from typing import Literal, Protocol, cast
 
 from hoyo_cli.auth.credentials import Credentials, deserialize_credentials
 from hoyo_cli.errors import BrowserImportError, ErrorCode
 
 SUPPORTED_BROWSERS = ("chrome", "edge", "firefox", "chromium", "opera", "brave")
-_LABELS = dict(
+# The locked browser-cookie3 0.20.1 supplies these six readers on each platform.
+# Only Windows locations are fixture-verified for explicit profile selection.
+# Reader availability is not installation detection or proof of a valid login.
+ProfileCapability = Literal["explicit", "library"]
+BROWSER_CAPABILITIES: Mapping[str, Mapping[str, ProfileCapability]] = MappingProxyType(
+    {
+        "win32": MappingProxyType(dict.fromkeys(SUPPORTED_BROWSERS, "explicit")),
+        "darwin": MappingProxyType(dict.fromkeys(SUPPORTED_BROWSERS, "library")),
+        "linux": MappingProxyType(dict.fromkeys(SUPPORTED_BROWSERS, "library")),
+    }
+)
+
+
+def browser_capability(browser: str, platform: str) -> ProfileCapability | None:
+    return BROWSER_CAPABILITIES.get(platform, {}).get(browser)
+
+
+_LABELS: Mapping[str, str] = dict(
     zip(
         SUPPORTED_BROWSERS,
         ("Chrome", "Edge", "Firefox", "Chromium", "Opera", "Brave"),
@@ -205,7 +224,7 @@ class BrowserCookieAdapter:
     ) -> None:
         self._platform = platform if platform is not None else sys.platform
         self._environment = environment if environment is not None else os.environ
-        self._profiles: dict[str, BrowserProfile] = {}
+        self._profiles: dict[str, BrowserProfile | None] = {}
 
     def _roots(self, browser: str) -> tuple[tuple[str, Path], ...]:
         # Only paths accepted by the locked reader are enumerated, without
@@ -238,34 +257,41 @@ class BrowserCookieAdapter:
             for base in bases:
                 root = base / layout.format(channel=channel)
                 if root.is_dir():
-                    label = channel.strip(" -") or "Stable"
+                    label = "Canary" if channel == " SxS" else channel.strip(" -")
+                    label = label or "Stable"
                     roots.append((label, root))
         return tuple(roots)
 
     def list_sessions(self) -> tuple[BrowserSession, ...]:
-        if self._platform not in ("win32", "darwin", "linux"):
+        capabilities = BROWSER_CAPABILITIES.get(self._platform)
+        if capabilities is None:
             return ()
         try:
             return tuple(
-                BrowserSession(browser, _LABELS[browser], self._platform == "win32")
-                for browser in SUPPORTED_BROWSERS
-                if self._platform != "win32" or self._roots(browser)
+                BrowserSession(
+                    browser,
+                    _LABELS[browser]
+                    if capability == "explicit"
+                    else f"{_LABELS[browser]} (library-selected profile; "
+                    "installation unverified)",
+                    capability == "explicit",
+                )
+                for browser, capability in capabilities.items()
+                if capability == "library" or self._roots(browser)
             )
         except OSError as error:
             raise classify_browser_failure(error) from None
 
     def list_profiles(self, source_id: str) -> tuple[BrowserProfile, ...]:
-        if source_id not in SUPPORTED_BROWSERS or self._platform not in (
-            "win32",
-            "darwin",
-            "linux",
-        ):
+        capability = browser_capability(source_id, self._platform)
+        if capability is None:
             raise browser_error(ErrorCode.BROWSER_UNSUPPORTED)
-        if self._platform != "win32":
+        if capability == "library":
             profile = BrowserProfile(source_id, source_id, "Library-selected profile")
             self._profiles[source_id] = profile
             return (profile,)
         profiles: list[BrowserProfile] = []
+        seen: set[Path] = set()
         try:
             for channel, root in self._roots(source_id):
                 if source_id == "firefox":
@@ -273,7 +299,7 @@ class BrowserCookieAdapter:
                         continue
                     entries = self._firefox_profiles(root)
                 elif source_id == "opera":
-                    entries = [(channel, root)]
+                    entries = [("", root)]
                 else:
                     entries = [
                         (path.name, path)
@@ -282,6 +308,9 @@ class BrowserCookieAdapter:
                         and (path.name == "Default" or path.name.startswith("Profile "))
                     ]
                 for label, directory in entries:
+                    directory = directory.resolve()
+                    if directory in seen:
+                        continue
                     if source_id == "firefox":
                         cookie_file, key_file = directory / "cookies.sqlite", None
                     else:
@@ -289,26 +318,32 @@ class BrowserCookieAdapter:
                         if not cookie_file.is_file():
                             cookie_file = directory / "Cookies"
                         key_file = root / "Local State"
-                    source = f"{source_id}:{len(profiles)}"
+                    if not cookie_file.is_file():
+                        continue
+                    seen.add(directory)
+                    # Path-derived opaque tokens cannot shift to a different
+                    # profile when another profile is added or removed.
+                    token = hashlib.sha256(str(directory).encode("utf-8")).hexdigest()
+                    source = f"{source_id}:{token}"
                     safe_label = "".join(c for c in label if c.isprintable())[:80]
                     profile = BrowserProfile(
                         source,
                         source_id,
-                        f"{channel} / {safe_label}",
+                        f"{channel} / {safe_label}" if safe_label else channel,
                         cookie_file,
                         key_file,
                     )
                     profiles.append(profile)
         except (OSError, configparser.Error, UnicodeError) as error:
             raise classify_browser_failure(error) from None
+        # Tombstones distinguish a stale selection from an unselected token.
+        # A removed Firefox registration is stale even if its database remains.
+        for key in self._profiles:
+            if key.partition(":")[0] == source_id:
+                self._profiles[key] = None
+        self._profiles.update({profile.source_id: profile for profile in profiles})
         if not profiles:
             raise browser_error(ErrorCode.BROWSER_PROFILE_MISSING)
-        self._profiles = {
-            key: profile
-            for key, profile in self._profiles.items()
-            if profile.browser != source_id
-        }
-        self._profiles.update({profile.source_id: profile for profile in profiles})
         return tuple(profiles)
 
     @staticmethod
@@ -327,12 +362,20 @@ class BrowserCookieAdapter:
             if relative:
                 path = root / path
             entries.append((parser.get(section, "Name", fallback=section), path))
-        return entries
+        return sorted(entries, key=lambda entry: (entry[0], str(entry[1])))
 
     def read(self, source_id: str) -> Credentials:
-        profile = self._profiles.get(source_id)
-        if profile is None:
+        if source_id not in self._profiles:
             raise browser_error(ErrorCode.BROWSER_UNSUPPORTED)
+        profile = self._profiles[source_id]
+        if profile is None:
+            raise browser_error(ErrorCode.BROWSER_PROFILE_MISSING)
+        if profile.cookie_file is not None:
+            try:
+                if not profile.cookie_file.is_file():
+                    raise browser_error(ErrorCode.BROWSER_PROFILE_MISSING)
+            except OSError as error:
+                raise classify_browser_failure(error) from None
         return read_browser_profile(profile)
 
 

@@ -115,6 +115,10 @@ def test_firefox_uses_registered_relative_and_absolute_profiles(tmp_path: Path) 
     # Local Firefox stores cache metadata, not the registered profiles.ini.
     (tmp_path / "Local/Mozilla/Firefox").mkdir(parents=True)
     external = tmp_path / "custom-profile"
+    (root / "Profiles/one").mkdir(parents=True)
+    (root / "Profiles/one/cookies.sqlite").touch()
+    external.mkdir()
+    (external / "cookies.sqlite").touch()
     (root / "profiles.ini").write_text(
         "[Profile0]\nName=Primary\nIsRelative=1\nPath=Profiles/one\n"
         f"[Profile1]\nName=Other\nIsRelative=0\nPath={external.as_posix()}\n",
@@ -122,8 +126,8 @@ def test_firefox_uses_registered_relative_and_absolute_profiles(tmp_path: Path) 
     )
     profiles = windows_adapter(tmp_path).list_profiles("firefox")
     assert [p.cookie_file for p in profiles] == [
-        root / "Profiles/one/cookies.sqlite",
         external / "cookies.sqlite",
+        root / "Profiles/one/cookies.sqlite",
     ]
     assert all(p.key_file is None for p in profiles)
 

@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import Protocol, cast
 
 from hoyo_cli.auth.browser_import import (
-    SUPPORTED_BROWSERS,
+    browser_capability,
     browser_error,
     classify_browser_failure,
 )
@@ -91,7 +91,7 @@ def _preflight_database(cookie_file: str) -> None:
 def load_selected(
     browser: str, cookie_file: str | None, key_file: str | None
 ) -> Credentials:
-    if browser not in SUPPORTED_BROWSERS:
+    if browser_capability(browser, sys.platform) is None:
         raise browser_error(ErrorCode.BROWSER_UNSUPPORTED)
     # Opening preserves OS evidence that the library's fallback can swallow.
     # It does not read contents or probe another profile.

@@ -207,7 +207,7 @@ def test_terminal_pair_is_hidden_and_source_choice_is_explicit(tmp_path: Path) -
     assert "Cookie header" not in result.output and "\x1b[" not in result.output
 
 
-@pytest.mark.parametrize("stage", ["HoYoLAB session", "Browser profile"])
+@pytest.mark.parametrize("stage", ["Browser source", "Browser profile"])
 def test_browser_picker_can_switch_to_manual_before_import(
     tmp_path: Path, stage: str
 ) -> None:
