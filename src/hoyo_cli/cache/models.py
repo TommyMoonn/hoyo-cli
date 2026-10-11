@@ -1,4 +1,4 @@
-"""Version 1 cache codec with explicit domain types at the JSON boundary."""
+"""Version 2 profile cache codec with explicit types at the JSON boundary."""
 
 import json
 from collections.abc import Callable
@@ -25,7 +25,7 @@ from hoyo_cli.models.genshin import (
 from hoyo_cli.models.hsr import HSRStatus
 from hoyo_cli.models.zzz import TempleStatus, ZZZStatus
 
-CACHE_VERSION = 1
+CACHE_VERSION = 2
 T = TypeVar("T")
 
 
@@ -38,7 +38,7 @@ def require_uid(value: object) -> int:
 @dataclass(frozen=True)
 class CacheEntry:
     cache_version: int
-    account: str
+    profile: str
     game: GameId
     fetched_at: datetime
     status: GameStatus
@@ -47,8 +47,8 @@ class CacheEntry:
     def __post_init__(self) -> None:
         if type(self.cache_version) is not int or self.cache_version != CACHE_VERSION:
             raise ValueError("Unsupported cache version.")
-        if not self.account:
-            raise ValueError("A cache account is required.")
+        if not self.profile:
+            raise ValueError("A cache profile is required.")
         if self.game not in GAME_IDS or self.status.game != self.game:
             raise ValueError("Cache game does not match its snapshot.")
         require_uid(self.uid)
@@ -253,7 +253,7 @@ def decode_entry(content: str) -> CacheEntry:
     parse = {"genshin": _genshin, "hsr": _hsr, "zzz": _zzz}[game]
     return CacheEntry(
         _integer(data["cache_version"]),
-        _text(data["account"]),
+        _text(data["profile"]),
         game,
         _timestamp(data["fetched_at"]),
         parse(payload),

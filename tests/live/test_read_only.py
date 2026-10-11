@@ -5,7 +5,7 @@ import os
 import pytest
 
 from hoyo_cli.auth.credentials import open_store
-from hoyo_cli.config.models import resolve_account, resolve_games
+from hoyo_cli.config.models import resolve_games, resolve_login, resolve_profile
 from hoyo_cli.config.paths import config_path, credentials_path
 from hoyo_cli.config.repository import load_config
 from hoyo_cli.errors import AppError
@@ -24,10 +24,11 @@ async def test_configured_account_status_is_read_only(
         pytest.skip("Live status requires configuration from hoyo init.")
     try:
         config = load_config(config_path())
-        name, account = resolve_account(config, os.environ.get("HOYO_LIVE_ACCOUNT"))
-        games = resolve_games(config, account, game=None, account_name=name)
-        credentials = open_store(account.credential_backend, credentials_path()).get(
-            name
+        name, profile = resolve_profile(config, os.environ.get("HOYO_LIVE_PROFILE"))
+        games = resolve_games(config, profile, game=None, profile_name=name)
+        login = resolve_login(config, profile)
+        credentials = open_store(login.credential_backend, credentials_path()).get(
+            login.credential_key
         )
     except AppError:
         pytest.skip(
@@ -43,7 +44,7 @@ async def test_configured_account_status_is_read_only(
     gateway = GenshinPyGateway(credentials)
     for game in games:
         try:
-            result = await gateway.fetch_status(game, account.games[game].uid)
+            result = await gateway.fetch_status(game, profile.games[game].uid)
         except AppError as error:
             pytest.fail(f"{game}: {error.message}", pytrace=False)
         assert result.game == game

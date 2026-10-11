@@ -8,7 +8,7 @@ import click
 
 from hoyo_cli.auth.credentials import open_store
 from hoyo_cli.commands import CommandOptions
-from hoyo_cli.config.models import resolve_account, resolve_games
+from hoyo_cli.config.models import resolve_games, resolve_login, resolve_profile
 from hoyo_cli.config.paths import cache_root, config_path, credentials_path
 from hoyo_cli.config.repository import load_config
 from hoyo_cli.errors import AppError, CredentialError, ErrorCode
@@ -26,14 +26,17 @@ def _now() -> datetime:
 
 def run_status(*, options: CommandOptions, game: GameId | None) -> None:
     config = load_config(config_path())
-    name, account = resolve_account(config, options.account)
-    games = resolve_games(config, account, game=game, account_name=name)
-    credentials = open_store(account.credential_backend, credentials_path()).get(name)
+    name, profile = resolve_profile(config, options.profile)
+    games = resolve_games(config, profile, game=game, profile_name=name)
+    login = resolve_login(config, profile)
+    credentials = open_store(login.credential_backend, credentials_path()).get(
+        login.credential_key
+    )
     if credentials is None:
         raise CredentialError(
-            f"No credentials for account {name}.",
+            f"No credentials for profile {name}.",
             code=ErrorCode.CREDENTIALS_MISSING,
-            hint="Run: hoyo account edit NAME",
+            hint="Run: hoyo profile edit <name>",
         )
     try:
         gateway = GenshinPyGateway(credentials)
@@ -47,8 +50,8 @@ def run_status(*, options: CommandOptions, game: GameId | None) -> None:
             ) as progress:
                 return await fetch_all_status(
                     gateway,
-                    {selected: account.games[selected].uid for selected in games},
-                    account=name,
+                    {selected: profile.games[selected].uid for selected in games},
+                    profile=name,
                     cache_root=cache_root(),
                     clock=_now,
                     observer=progress.observe,
@@ -74,7 +77,7 @@ def run_status(*, options: CommandOptions, game: GameId | None) -> None:
     console.print(
         render_overview(
             results,
-            account=name,
+            profile=name,
             detailed=options.detailed,
             now=_now(),
             focused=game is not None,

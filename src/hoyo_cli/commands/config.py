@@ -21,7 +21,12 @@ from hoyo_cli.config.editor import (
     editor_available,
     resolve_editor,
 )
-from hoyo_cli.config.models import AppConfig, ordered_games, resolve_account
+from hoyo_cli.config.models import (
+    AppConfig,
+    ordered_games,
+    resolve_login,
+    resolve_profile,
+)
 from hoyo_cli.config.paths import config_path
 from hoyo_cli.config.repository import (
     commit_config,
@@ -37,24 +42,26 @@ from hoyo_cli.render.setup import SetupPresenter
 def show_config(config: AppConfig, path: Path) -> str:
     lines = [
         f"Config: {path}",
-        f"Default account: {config.default_account}",
+        f"Default profile: {config.default_profile}",
         f"Game order: {', '.join(config.game_order) or '(canonical fallback)'}",
         f"Display color: {config.display_color}",
         "Editor: " + describe_editor(config.editor_command),
         "Editor executable: "
         + ("available" if editor_available(config.editor_command) else "unavailable"),
     ]
-    for name, account in config.accounts.items():
+    for name, profile in config.profiles.items():
+        login = resolve_login(config, profile)
         lines.extend(
             [
                 "",
-                f"Account: {name}",
-                f"  Credential backend: {account.credential_backend}",
+                f"Profile: {name}",
+                f"  Login: {profile.login}",
+                f"  Credential backend: {login.credential_backend}",
             ]
         )
         any_enabled = False
         for game in ordered_games(config):
-            selection = account.games.get(game)
+            selection = profile.games.get(game)
             if selection is not None and selection.enabled:
                 lines.append(f"  {game}: enabled, UID {selection.uid}")
                 any_enabled = True
@@ -67,9 +74,9 @@ def show_config(config: AppConfig, path: Path) -> str:
     lines.extend(
         [
             "",
-            "Add account: hoyo account add",
-            "Update account or session: hoyo account edit NAME",
-            "Switch default: hoyo account use NAME",
+            "Add profile: hoyo profile add",
+            "Update profile or session: hoyo profile edit <name>",
+            "Switch default: hoyo profile use <name>",
             "Change game order: hoyo config order",
             "Change editor: hoyo config editor",
         ]
@@ -158,7 +165,7 @@ def edit_config(path: Path, editor: ResolvedEditor) -> int:
 def run_config(*, options: CommandOptions, edit: bool) -> None:
     path = config_path()
     config = load_config(path)
-    resolve_account(config, options.account)
+    resolve_profile(config, options.profile)
     if edit:
         try:
             editor = resolve_editor(config.editor_command)

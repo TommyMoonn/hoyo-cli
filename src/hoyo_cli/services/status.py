@@ -17,7 +17,7 @@ async def fetch_all_status(
     gateway: HoyolabGateway,
     requested: Mapping[GameId, int],
     *,
-    account: str,
+    profile: str,
     cache_root: Path,
     clock: Callable[[], datetime],
     observer: ProgressObserver | None = None,
@@ -48,7 +48,7 @@ async def fetch_all_status(
                 if isinstance(outcome, AppError)
                 else AppError("HoYoLAB status request failed.")
             )
-            cached = read_eligible(cache_root, account, game, uid=uid, now=clock())
+            cached = read_eligible(cache_root, profile, game, uid=uid, now=clock())
             if cached is not None:
                 return StatusResult(
                     game, cached.status, cached.fetched_at, stale=True, error=error
@@ -61,7 +61,7 @@ async def fetch_all_status(
         try:
             write_cache(
                 cache_root,
-                CacheEntry(CACHE_VERSION, account, game, fetched_at, snapshot, uid=uid),
+                CacheEntry(CACHE_VERSION, profile, game, fetched_at, snapshot, uid=uid),
             )
         except (OSError, ValueError, TypeError, RecursionError, OverflowError):
             cache_error = AppError(

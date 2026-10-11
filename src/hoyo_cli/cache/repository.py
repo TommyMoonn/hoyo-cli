@@ -1,4 +1,4 @@
-"""Per-account/game cache I/O with bounded age and atomic replacement."""
+"""Per-profile/game cache I/O with bounded age and atomic replacement."""
 
 import hashlib
 import os
@@ -12,29 +12,30 @@ from hoyo_cli.models.common import GAME_IDS, GameId, require_aware
 MAX_CACHE_AGE = timedelta(hours=3)
 
 
-def _path(cache_root: Path, account: str, game: GameId) -> Path:
-    if not account or game not in GAME_IDS:
+def _path(cache_root: Path, profile: str, game: GameId, uid: int) -> Path:
+    if not profile or game not in GAME_IDS:
         raise ValueError("Invalid cache identity.")
-    # Exact account names can contain separators, reserved Windows names, or
+    # Exact profile names can contain separators, reserved Windows names, or
     # differ only by case. A digest gives each one a portable directory identity.
-    identity = hashlib.sha256(account.encode("utf-8")).hexdigest()
+    require_uid(uid)
+    identity = hashlib.sha256(profile.encode("utf-8")).hexdigest()
     directory = cache_root / identity
-    path = directory / f"{game}.json"
+    path = directory / f"{game}-{uid}.json"
     if directory.resolve() != cache_root.resolve() / identity or path.is_symlink():
         raise ValueError("Refusing redirected cache paths.")
     return path
 
 
 def read_eligible(
-    cache_root: Path, account: str, game: GameId, *, uid: int, now: datetime
+    cache_root: Path, profile: str, game: GameId, *, uid: int, now: datetime
 ) -> CacheEntry | None:
     require_aware(now)
     try:
         require_uid(uid)
         entry = decode_entry(
-            _path(cache_root, account, game).read_text(encoding="utf-8")
+            _path(cache_root, profile, game, uid).read_text(encoding="utf-8")
         )
-        if entry.account != account or entry.game != game or entry.uid != uid:
+        if entry.profile != profile or entry.game != game or entry.uid != uid:
             return None
         age = now - entry.fetched_at
         return entry if timedelta(0) <= age <= MAX_CACHE_AGE else None
@@ -45,7 +46,7 @@ def read_eligible(
 
 def write_cache(cache_root: Path, entry: CacheEntry) -> None:
     content = encode_entry(entry)
-    path = _path(cache_root, entry.account, entry.game)
+    path = _path(cache_root, entry.profile, entry.game, entry.uid)
     temporary: Path | None = None
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -62,7 +63,7 @@ def write_cache(cache_root: Path, entry: CacheEntry) -> None:
             stream.write(content)
             stream.flush()
             os.fsync(stream.fileno())
-        _path(cache_root, entry.account, entry.game)
+        _path(cache_root, entry.profile, entry.game, entry.uid)
         os.replace(temporary, path)
         temporary = None
     finally:

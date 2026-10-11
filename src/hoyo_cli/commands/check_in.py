@@ -7,7 +7,7 @@ import click
 
 from hoyo_cli.auth.credentials import open_store
 from hoyo_cli.commands import CommandOptions
-from hoyo_cli.config.models import resolve_account, resolve_games
+from hoyo_cli.config.models import resolve_games, resolve_login, resolve_profile
 from hoyo_cli.config.paths import config_path, credentials_path
 from hoyo_cli.config.repository import load_config
 from hoyo_cli.errors import AppError, CredentialError, ErrorCode
@@ -21,14 +21,17 @@ from hoyo_cli.services.check_in import check_in_games
 
 def run_check_in(*, options: CommandOptions, game: GameId | None) -> None:
     config = load_config(config_path())
-    name, account = resolve_account(config, options.account)
-    games = resolve_games(config, account, game=game, account_name=name)
-    credentials = open_store(account.credential_backend, credentials_path()).get(name)
+    name, profile = resolve_profile(config, options.profile)
+    games = resolve_games(config, profile, game=game, profile_name=name)
+    login = resolve_login(config, profile)
+    credentials = open_store(login.credential_backend, credentials_path()).get(
+        login.credential_key
+    )
     if credentials is None:
         raise CredentialError(
-            f"No credentials for account {name}.",
+            f"No credentials for profile {name}.",
             code=ErrorCode.CREDENTIALS_MISSING,
-            hint="Run: hoyo account edit NAME",
+            hint="Run: hoyo profile edit <name>",
         )
     try:
         gateway = GenshinPyGateway(credentials)
@@ -42,7 +45,7 @@ def run_check_in(*, options: CommandOptions, game: GameId | None) -> None:
             ) as progress:
                 return await check_in_games(
                     gateway,
-                    {selected: account.games[selected].uid for selected in games},
+                    {selected: profile.games[selected].uid for selected in games},
                     observer=progress.observe,
                 )
 
@@ -66,7 +69,7 @@ def run_check_in(*, options: CommandOptions, game: GameId | None) -> None:
         interactive=sys.stdout.isatty(),
         configured_color=config.display_color,
     )
-    console.print(render_check_in(results, account=name))
+    console.print(render_check_in(results, profile=name))
     if not results or any(
         result.outcome in ("failed", "unconfirmed") for result in results
     ):

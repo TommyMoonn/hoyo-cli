@@ -77,6 +77,18 @@ class Credentials:
     def __repr__(self) -> str:
         return "Credentials(<redacted>)"
 
+    def same_identity(self, other: "Credentials") -> bool:
+        """Compare validated IDs without disclosing them or their cookie spelling."""
+
+        def identity(credentials: "Credentials") -> int:
+            return next(
+                int(credentials.fields[key])
+                for key in _IDENTIFIERS
+                if key in credentials.fields
+            )
+
+        return identity(self) == identity(other)
+
 
 def parse_cookie_header(raw: str) -> Credentials:
     fields: dict[str, str] = {}
@@ -122,7 +134,7 @@ def deserialize_credentials(raw: str) -> Credentials:
     except (ValueError, TypeError, CredentialError):
         raise CredentialError(
             "Stored credentials are invalid; repair or remove the keyring entry "
-            "before running hoyo account edit NAME."
+            "before running hoyo profile edit <name>."
         ) from None
 
 

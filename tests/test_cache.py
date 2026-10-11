@@ -34,7 +34,7 @@ def domain_snapshots() -> dict[GameId, GameStatus]:
 
 
 def entry(snapshots: dict[GameId, GameStatus], game: GameId = "genshin") -> CacheEntry:
-    return CacheEntry(1, "main", game, NOW, snapshots[game], uid=1)
+    return CacheEntry(2, "main", game, NOW, snapshots[game], uid=1)
 
 
 @pytest.mark.parametrize(
@@ -73,9 +73,9 @@ def test_roundtrip_each_domain_model(
 @pytest.mark.parametrize(
     "location, value",
     [
-        (("cache_version",), 2),
+        (("cache_version",), 1),
         (("cache_version",), True),
-        (("account",), "alt"),
+        (("profile",), "alt"),
         (("game",), "hsr"),
         (("fetched_at",), "2026-10-10T11:31:00"),
         (("fetched_at",), "invalid"),
@@ -132,14 +132,14 @@ def test_write_only_updates_target_game(
 ) -> None:
     for game in GAME_IDS:
         write_cache(tmp_path, entry(domain_snapshots, game))
-    write_cache(tmp_path, replace(entry(domain_snapshots), account="alt"))
+    write_cache(tmp_path, replace(entry(domain_snapshots), profile="alt"))
     before = {p: p.read_bytes() for p in tmp_path.rglob("*.json")}
     updated = replace(
         entry(domain_snapshots, "hsr"), fetched_at=NOW - timedelta(hours=1)
     )
     write_cache(tmp_path, updated)
     changed = [p.name for p, content in before.items() if p.read_bytes() != content]
-    assert changed == ["hsr.json"]
+    assert changed == ["hsr-1.json"]
     assert read_eligible(tmp_path, "main", "hsr", uid=1, now=NOW) == updated
 
 
@@ -159,14 +159,14 @@ def test_failed_atomic_replace_preserves_previous_bytes_and_cleans_temp(
     assert list(path.parent.iterdir()) == [path]
 
 
-@pytest.mark.parametrize("account", ["../escape", "MAIN", "main", "CON", "a/b", "a\\b"])
+@pytest.mark.parametrize("profile", ["../escape", "MAIN", "main", "CON", "a/b", "a\\b"])
 def test_account_paths_are_safe_and_exact(
-    tmp_path: Path, domain_snapshots: dict[GameId, GameStatus], account: str
+    tmp_path: Path, domain_snapshots: dict[GameId, GameStatus], profile: str
 ) -> None:
-    snapshot = replace(entry(domain_snapshots), account=account)
+    snapshot = replace(entry(domain_snapshots), profile=profile)
     write_cache(tmp_path, snapshot)
-    assert read_eligible(tmp_path, account, "genshin", uid=1, now=NOW) == snapshot
-    assert read_eligible(tmp_path, account + ".", "genshin", uid=1, now=NOW) is None
+    assert read_eligible(tmp_path, profile, "genshin", uid=1, now=NOW) == snapshot
+    assert read_eligible(tmp_path, profile + ".", "genshin", uid=1, now=NOW) is None
     assert all(p.is_relative_to(tmp_path) for p in tmp_path.rglob("*.json"))
 
 
@@ -174,7 +174,7 @@ def test_case_distinct_accounts_do_not_overwrite(
     tmp_path: Path, domain_snapshots: dict[GameId, GameStatus]
 ) -> None:
     lower = entry(domain_snapshots)
-    upper = replace(lower, account="MAIN", fetched_at=NOW - timedelta(hours=1))
+    upper = replace(lower, profile="MAIN", fetched_at=NOW - timedelta(hours=1))
     write_cache(tmp_path, lower)
     write_cache(tmp_path, upper)
     assert len(list(tmp_path.rglob("*.json"))) == 2
@@ -237,7 +237,7 @@ def test_duplicate_fields_are_rejected(
     write_cache(tmp_path, entry(domain_snapshots))
     path = next(tmp_path.rglob("*.json"))
     content = path.read_text().replace(
-        '"cache_version": 1', '"cache_version": 1, "cache_version": 1'
+        '"cache_version": 2', '"cache_version": 2, "cache_version": 2'
     )
     path.write_text(content)
     assert read_eligible(tmp_path, "main", "genshin", uid=1, now=NOW) is None
@@ -296,7 +296,7 @@ def test_uid_change_replaces_only_its_account_game_snapshot(
     target = next(tmp_path.rglob("*.json"))
     for game in ("hsr", "zzz"):
         write_cache(tmp_path, entry(domain_snapshots, game))
-    write_cache(tmp_path, replace(original, account="alt"))
+    write_cache(tmp_path, replace(original, profile="alt"))
     before = {p: p.read_bytes() for p in tmp_path.rglob("*.json")}
     assert read_eligible(tmp_path, "main", "genshin", uid=2, now=NOW) is None
     assert read_eligible(tmp_path, "main", "genshin", uid=1, now=NOW) == original
@@ -304,9 +304,10 @@ def test_uid_change_replaces_only_its_account_game_snapshot(
 
     changed = replace(original, uid=2)
     write_cache(tmp_path, changed)
-    assert set(tmp_path.rglob("*.json")) == set(before)
-    assert [p for p, data in before.items() if p.read_bytes() != data] == [target]
-    assert read_eligible(tmp_path, "main", "genshin", uid=1, now=NOW) is None
+    assert len(set(tmp_path.rglob("*.json")) - set(before)) == 1
+    assert all(p.read_bytes() == data for p, data in before.items())
+    assert target.read_bytes() == before[target]
+    assert read_eligible(tmp_path, "main", "genshin", uid=1, now=NOW) == original
     assert read_eligible(tmp_path, "main", "genshin", uid=2, now=NOW) == changed
 
 

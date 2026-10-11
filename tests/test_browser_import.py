@@ -597,8 +597,8 @@ def test_windows_brave_lock_recovers_in_account_edit_without_saving_on_cancel(
     with exclusive_windows_file(database):
         result = runner.invoke(
             main,
-            ["account", "edit", "main", "--no-color"],
-            input="2\ny\ny\n1\n1\n3\n" + TEST_COOKIE + "\n1\n1\n1\n2\n",
+            ["profile", "edit", "main", "--no-color"],
+            input="3\ny\ny\n1\n1\n3\n" + TEST_COOKIE + "\n1\n1\n1\n2\n",
         )
     assert result.exit_code == 1, result.output
     assert "cookie database is locked" in result.stderr

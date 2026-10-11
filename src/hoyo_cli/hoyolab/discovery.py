@@ -45,11 +45,13 @@ def discover_characters(
             continue
         if account.uid <= 0 or not account.server:
             raise AppError("HoYoLAB returned an invalid linked character.")
+        server_name = _safe_label(account.server_name).strip()
+        region_label = server_name or "Region unavailable"
         character = CharacterRef(
             game,
             account.uid,
             account.server,
-            _safe_label(f"{account.nickname} ({account.server_name})"),
+            _safe_label(f"{account.nickname} ({region_label})"),
         )
         choices = groups.setdefault(game, [])
         if character not in choices:

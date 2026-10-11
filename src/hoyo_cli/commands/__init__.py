@@ -5,6 +5,6 @@ from dataclasses import dataclass
 
 @dataclass(frozen=True)
 class CommandOptions:
-    account: str | None = None
+    profile: str | None = None
     detailed: bool = False
     no_color: bool = False

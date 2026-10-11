@@ -5,7 +5,7 @@ from typing import TypeVar
 
 import click
 
-from hoyo_cli.commands import CommandOptions, account, check_in, config, init, status
+from hoyo_cli.commands import CommandOptions, check_in, config, init, profile, status
 from hoyo_cli.errors import AppError
 from hoyo_cli.models.common import GAME_IDS, GameId
 from hoyo_cli.render.errors import format_error
@@ -26,7 +26,7 @@ class _ApplicationGroup(click.Group):
             error = AppError(
                 "Command failed.",
                 hint=(
-                    "Review your account configuration. For check-in, check today's "
+                    "Review your profile configuration. For check-in, check today's "
                     "state on HoYoLAB before trying again."
                 ),
             )
@@ -39,10 +39,10 @@ def _common_options(
 ) -> Callable[[_Callback], _Callback]:
     def decorate(callback: _Callback) -> _Callback:
         callback = click.option(
-            "--account",
-            metavar="NAME",
+            "--profile",
+            metavar="<name>",
             help=(
-                "Select an exact named account for one invocation; "
+                "Select an exact named profile for one invocation; "
                 "keep the saved default."
             ),
         )(callback)
@@ -61,13 +61,13 @@ def _common_options(
 def _resolve_options(
     ctx: click.Context,
     *,
-    account: str | None,
+    profile: str | None,
     no_color: bool,
     detailed: bool = False,
 ) -> CommandOptions:
     root = ctx.find_root().ensure_object(CommandOptions)
     return CommandOptions(
-        account=account if account is not None else root.account,
+        profile=profile if profile is not None else root.profile,
         detailed=root.detailed or detailed,
         no_color=root.no_color or no_color,
     )
@@ -78,96 +78,96 @@ def _resolve_options(
 @_common_options(include_detailed=True)
 @click.pass_context
 def main(
-    ctx: click.Context, account: str | None, detailed: bool, no_color: bool
+    ctx: click.Context, profile: str | None, detailed: bool, no_color: bool
 ) -> None:
     """HoYoLAB status for Genshin Impact, Honkai: Star Rail, and Zenless Zone Zero.
 
     \b
     Common commands:
-      hoyo init          Set up the first account.
-      hoyo account add [NAME]  Add a new account without switching defaults.
-      hoyo account edit NAME   Update one existing account.
+      hoyo init          Set up the first profile.
+      hoyo profile add [name]  Add a new profile without switching defaults.
+      hoyo profile edit <name>   Update one existing profile.
       hoyo               Show all enabled games.
       hoyo genshin       Show one game's status.
       hoyo check-in zzz  Claim daily rewards for one game.
       hoyo config        Inspect selections, including disabled games.
       hoyo config order  Change the global game display order.
       hoyo config editor Choose the global preferred editor.
-      hoyo account       List accounts and mark the saved default.
-      hoyo account use NAME  Change the persistent default account.
+      hoyo profile       List profiles and mark the saved default.
+      hoyo profile use <name>  Change the persistent default profile.
     """
-    ctx.obj = CommandOptions(account=account, detailed=detailed, no_color=no_color)
+    ctx.obj = CommandOptions(profile=profile, detailed=detailed, no_color=no_color)
     if ctx.invoked_subcommand is None:
         ctx.invoke(
-            status_command, game=None, account=None, detailed=False, no_color=False
+            status_command, game=None, profile=None, detailed=False, no_color=False
         )
 
 
-@main.group(name="account", invoke_without_command=True)
+@main.group(name="profile", invoke_without_command=True)
 @click.pass_context
-def account_command(ctx: click.Context) -> None:
-    """List accounts, add/edit an account, or save the default with use NAME.
+def profile_command(ctx: click.Context) -> None:
+    """List profiles, add/edit a profile, or save the default with use <name>.
 
     Listing and switching do not access credentials or contact HoYoLAB.
-    --account on status/check-in selects an account for one invocation only.
+    --profile on status/check-in selects a profile for one invocation only.
     """
     if ctx.invoked_subcommand is None:
-        account.list_accounts()
+        profile.list_profiles()
 
 
-@account_command.command(name="use")
-@click.argument("name", metavar="NAME")
-def account_use_command(name: str) -> None:
-    """Save NAME as the default for future commands. Names must match exactly."""
-    account.use_account(name)
+@profile_command.command(name="use")
+@click.argument("name", metavar="<name>")
+def profile_use_command(name: str) -> None:
+    """Save <name> as the default for future commands. Names must match exactly."""
+    profile.use_profile(name)
 
 
-@account_command.command(name="add")
-@click.argument("name", metavar="[NAME]", required=False)
+@profile_command.command(name="add")
+@click.argument("name", metavar="[name]", required=False)
 @click.option("--no-color", is_flag=True, help="Disable terminal styling.")
 @click.pass_context
-def account_add_command(ctx: click.Context, name: str | None, no_color: bool) -> None:
-    """Add a new account; prompt for NAME when omitted. Keep the saved default."""
-    init.configure_account(
-        options=_resolve_options(ctx, account=None, no_color=no_color),
+def profile_add_command(ctx: click.Context, name: str | None, no_color: bool) -> None:
+    """Add a new profile; prompt for <name> when omitted. Keep the saved default."""
+    init.configure_profile(
+        options=_resolve_options(ctx, profile=None, no_color=no_color),
         mode="add",
         name=name,
     )
 
 
-@account_command.command(name="edit")
-@click.argument("name", metavar="NAME")
+@profile_command.command(name="edit")
+@click.argument("name", metavar="<name>")
 @click.option("--no-color", is_flag=True, help="Disable terminal styling.")
 @click.pass_context
-def account_edit_command(ctx: click.Context, name: str, no_color: bool) -> None:
-    """Edit NAME's games/characters, HoYoLAB session, or credential storage.
+def profile_edit_command(ctx: click.Context, name: str, no_color: bool) -> None:
+    """Edit <name>'s games/characters, HoYoLAB session, or credential storage.
 
     Names must match exactly. Character changes reuse the saved session.
     Review before Save; Cancel leaves files unchanged. Global preferences
-    belong to hoyo config; default switching belongs to hoyo account use NAME.
+    belong to hoyo config; default switching belongs to hoyo profile use <name>.
     """
-    init.configure_account(
-        options=_resolve_options(ctx, account=None, no_color=no_color),
+    init.configure_profile(
+        options=_resolve_options(ctx, profile=None, no_color=no_color),
         mode="edit",
         name=name,
     )
 
 
 @main.command(name="status")
-@click.argument("game", type=click.Choice(GAME_IDS), required=False)
+@click.argument("game", type=click.Choice(GAME_IDS), metavar="[game]", required=False)
 @_common_options(include_detailed=True)
 @click.pass_context
 def status_command(
     ctx: click.Context,
     game: GameId | None,
-    account: str | None,
+    profile: str | None,
     detailed: bool,
     no_color: bool,
 ) -> None:
-    """Show all enabled games, or the focused status for GAME."""
+    """Show all enabled games, or the focused status for [game]."""
     status.run_status(
         options=_resolve_options(
-            ctx, account=account, detailed=detailed, no_color=no_color
+            ctx, profile=profile, detailed=detailed, no_color=no_color
         ),
         game=game,
     )
@@ -178,12 +178,12 @@ def _game_alias(game: GameId) -> click.Command:
     @_common_options(include_detailed=True)
     @click.pass_context
     def alias(
-        ctx: click.Context, account: str | None, detailed: bool, no_color: bool
+        ctx: click.Context, profile: str | None, detailed: bool, no_color: bool
     ) -> None:
         ctx.invoke(
             status_command,
             game=game,
-            account=account,
+            profile=profile,
             detailed=detailed,
             no_color=no_color,
         )
@@ -196,13 +196,13 @@ for _game in GAME_IDS:
 
 
 @main.command(name="check-in")
-@click.argument("game", type=click.Choice(GAME_IDS), required=False)
+@click.argument("game", type=click.Choice(GAME_IDS), metavar="[game]", required=False)
 @_common_options()
 @click.pass_context
 def check_in_command(
-    ctx: click.Context, game: GameId | None, account: str | None, no_color: bool
+    ctx: click.Context, game: GameId | None, profile: str | None, no_color: bool
 ) -> None:
-    """Explicitly claim daily rewards for all enabled games, or GAME.
+    """Explicitly claim daily rewards for all enabled games, or [game].
 
     Today's state is checked with a network request for each game. Already
     checked-in games are then skipped without a claim. An uncertain claim gets
@@ -216,30 +216,24 @@ def check_in_command(
       hoyo check-in zzz
     """
     check_in.run_check_in(
-        options=_resolve_options(ctx, account=account, no_color=no_color), game=game
+        options=_resolve_options(ctx, profile=profile, no_color=no_color), game=game
     )
 
 
 @main.command(name="init")
-@click.option(
-    "--account",
-    metavar="NAME",
-    help="Unsupported for init; use hoyo account edit NAME.",
-)
 @click.option("--no-color", is_flag=True, help="Disable terminal styling.")
 @click.pass_context
-def init_command(ctx: click.Context, account: str | None, no_color: bool) -> None:
-    """Set up the first account interactively.
+def init_command(ctx: click.Context, no_color: bool) -> None:
+    """Set up the first profile interactively.
 
-    Once initialized, show account/config command guidance without changes.
-    Use hoyo account add to add an account, hoyo account edit NAME to update
+    Once initialized, show profile/config command guidance without changes.
+    Use hoyo profile add to add a profile, hoyo profile edit <name> to update
     one, and hoyo config order to change global game order.
     Choose an optional Editor preference at first-run review, or later with
     hoyo config editor.
-    --account is rejected; use hoyo account edit NAME for existing accounts.
     """
-    init.configure_account(
-        options=_resolve_options(ctx, account=account, no_color=no_color)
+    init.configure_profile(
+        options=_resolve_options(ctx, profile=None, no_color=no_color)
     )
 
 
@@ -248,12 +242,12 @@ def init_command(ctx: click.Context, account: str | None, no_color: bool) -> Non
 @_common_options()
 @click.pass_context
 def config_command(
-    ctx: click.Context, edit: bool, account: str | None, no_color: bool
+    ctx: click.Context, edit: bool, profile: str | None, no_color: bool
 ) -> None:
     """Inspect non-secret configuration, or open it with --edit.
 
     Shows enabled, disabled, and unconfigured games without reading secrets.
-    Use hoyo config order for global order and hoyo account edit NAME for
+    Use hoyo config order for global order and hoyo profile edit <name> for
     characters, session, or credential storage.
     Use hoyo config editor to select a saved editor. --edit uses the saved
     preference, then VISUAL, then EDITOR. Wait-capable GUI presets use --wait; custom
@@ -264,7 +258,7 @@ def config_command(
             raise click.UsageError("Use hoyo config --edit without a subcommand.")
         return
     config.run_config(
-        options=_resolve_options(ctx, account=account, no_color=no_color), edit=edit
+        options=_resolve_options(ctx, profile=profile, no_color=no_color), edit=edit
     )
 
 
@@ -284,5 +278,5 @@ def config_editor_command(ctx: click.Context, no_color: bool) -> None:
     without quotes, and arguments individually. No editor opens during selection.
     """
     config.configure_editor(
-        no_color=_resolve_options(ctx, account=None, no_color=no_color).no_color
+        no_color=_resolve_options(ctx, profile=None, no_color=no_color).no_color
     )

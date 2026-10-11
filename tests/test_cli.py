@@ -8,12 +8,13 @@ from unittest.mock import AsyncMock, call, patch
 
 import pytest
 from click.testing import CliRunner
+from profile_fixtures import ProfileSeed, save_profile
 
 from hoyo_cli.auth.credentials import Credentials, parse_cookie_header
 from hoyo_cli.auth.plaintext_backend import PlaintextStore
 from hoyo_cli.cli import main
-from hoyo_cli.config.models import AccountConfig, GameSelection
-from hoyo_cli.config.repository import load_config, save_account
+from hoyo_cli.config.models import GameSelection
+from hoyo_cli.config.repository import load_config
 from hoyo_cli.errors import NetworkError
 from hoyo_cli.models.common import GameId
 from hoyo_cli.models.progress import ProgressEvent
@@ -58,7 +59,7 @@ def test_missing_credentials_has_specific_category_and_setup_hint(
     assert caught.value.code == "credentials_missing"
     assert not caught.value.retryable
     assert result.exit_code == 3
-    assert result.stderr.splitlines()[-1] == "Run: hoyo account edit NAME"
+    assert result.stderr.splitlines()[-1] == "Run: hoyo profile edit <name>"
     status_gateway.fetch_status.assert_not_called()
 
 
@@ -112,7 +113,7 @@ def test_known_boundary_error_uses_same_safe_format(
         result = runner.invoke(main, [command])
     assert result.exit_code == 3
     assert result.stderr.startswith("Error: HoYoLAB rejected the session.\nTry: ")
-    assert "hoyo account edit NAME" in result.stderr and not result.stdout
+    assert "hoyo profile edit <name>" in result.stderr and not result.stdout
 
 
 def test_help_identifies_hoyo(runner: CliRunner) -> None:
@@ -128,12 +129,12 @@ def test_help_connects_setup_settings_and_normal_commands(
     result = runner.invoke(main, [*command, "--help"])
     assert result.exit_code == 0
     if command == ["init"]:
-        assert "first account" in result.output
-        assert "hoyo account edit NAME" in result.output
+        assert "first profile" in result.output
+        assert "hoyo profile edit <name>" in result.output
         assert "Existing-account actions" not in result.output
     elif command == ["config"]:
         assert "hoyo config order" in result.output
-        assert "hoyo account edit NAME" in result.output
+        assert "hoyo profile edit <name>" in result.output
     else:
         for example in (
             "hoyo init",
@@ -172,7 +173,7 @@ def test_status_forms_share_handler(
     handler.assert_called_once()
     assert handler.call_args.kwargs["game"] == game
     options = handler.call_args.kwargs["options"]
-    assert options.account is None
+    assert options.profile is None
     assert options.detailed is False
     assert options.no_color is False
 
@@ -182,17 +183,17 @@ def test_status_forms_share_handler(
 def test_status_options_resolve_consistently(
     runner: CliRunner, command: list[str], placement: str
 ) -> None:
-    flags = ["--account", "Alt.Exact", "--no-color", "--detailed"]
+    flags = ["--profile", "Alt.Exact", "--no-color", "--detailed"]
     arguments = flags + command if placement == "root" else command + flags
     if placement == "both":
-        arguments = ["--account", "root", "--no-color", "--detailed"] + command
-        arguments += ["--account", "Alt.Exact"]
+        arguments = ["--profile", "root", "--no-color", "--detailed"] + command
+        arguments += ["--profile", "Alt.Exact"]
     with patch("hoyo_cli.commands.status.run_status") as handler:
         result = runner.invoke(main, arguments)
     assert result.exit_code == 0, result.output
     handler.assert_called_once()
     options = handler.call_args.kwargs["options"]
-    assert options.account == "Alt.Exact"
+    assert options.profile == "Alt.Exact"
     assert options.no_color is True
     assert options.detailed is True
 
@@ -203,11 +204,11 @@ def test_root_account_survives_local_boolean_flags(
 ) -> None:
     with patch("hoyo_cli.commands.status.run_status") as handler:
         result = runner.invoke(
-            main, ["--account", "root", command, "--detailed", "--no-color"]
+            main, ["--profile", "root", command, "--detailed", "--no-color"]
         )
     assert result.exit_code == 0, result.output
     options = handler.call_args.kwargs["options"]
-    assert options.account == "root"
+    assert options.profile == "root"
     assert options.detailed is True
     assert options.no_color is True
 
@@ -221,7 +222,7 @@ def test_root_account_survives_local_boolean_flags(
             "hoyo_cli.commands.check_in.run_check_in",
             {"game": "zzz"},
         ),
-        (["init"], "hoyo_cli.commands.init.configure_account", {}),
+        (["init"], "hoyo_cli.commands.init.configure_profile", {}),
         (["config"], "hoyo_cli.commands.config.run_config", {"edit": False}),
         (["config", "--edit"], "hoyo_cli.commands.config.run_config", {"edit": True}),
     ],
@@ -234,16 +235,20 @@ def test_other_commands_dispatch_options(
     extra: dict[str, object],
     placement: str,
 ) -> None:
-    flags = ["--account", "Exact.Account", "--no-color"]
+    flags = ["--profile", "Exact.Account", "--no-color"]
     if placement == "root":
         arguments = flags + arguments
     elif placement == "local":
         arguments = arguments + flags
     else:
-        arguments = ["--account", "root", "--no-color"] + arguments
-        arguments += ["--account", "Exact.Account"]
+        arguments = ["--profile", "root", "--no-color"] + arguments
+        arguments += ["--profile", "Exact.Account"]
     with patch(handler_path) as handler:
         result = runner.invoke(main, arguments)
+    if handler_path.endswith("configure_profile") and placement != "root":
+        assert result.exit_code == 2 and "No such option '--profile'" in result.output
+        handler.assert_not_called()
+        return
     assert result.exit_code == 0, result.output
     handler.assert_called_once()
     assert {
@@ -252,7 +257,7 @@ def test_other_commands_dispatch_options(
         if key != "options"
     } == extra
     options = handler.call_args.kwargs["options"]
-    assert options.account == "Exact.Account"
+    assert options.profile == "Exact.Account"
     assert options.no_color is True
     assert options.detailed is False
 
@@ -269,7 +274,7 @@ def test_command_help_never_dispatches(runner: CliRunner, command: str) -> None:
     ):
         result = runner.invoke(main, ([command] if command else []) + ["--help"])
     assert result.exit_code == 0, result.output
-    assert "--account" in result.output
+    assert ("--profile" in result.output) is (command != "init")
     assert "--no-color" in result.output
     for handler in (status_handler, check_in_handler, init_handler, config_handler):
         handler.assert_not_called()
@@ -315,7 +320,7 @@ def test_checkin_without_config_fails_cleanly(
         ["watch"],
         ["notify"],
         ["--json"],
-        ["--account"],
+        ["--profile"],
         ["status", "genshin", "hsr"],
         ["genshin", "zzz"],
         ["config", "--detailed"],
@@ -342,7 +347,7 @@ def status_gateway(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> AsyncMock
 
     now = datetime(2026, 10, 10, 11, 31, tzinfo=UTC)
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
-    account = AccountConfig(
+    account = ProfileSeed(
         "plaintext",
         {
             "genshin": GameSelection(True, 111111111),
@@ -351,7 +356,7 @@ def status_gateway(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> AsyncMock
         },
     )
     for name in ("main", "alt"):
-        save_account(
+        save_profile(
             tmp_path / ".hoyo/config.toml",
             name,
             account,
@@ -415,7 +420,7 @@ def test_configured_game_order_is_preserved(
 
 @pytest.mark.parametrize("game", ["genshin", "hsr", "zzz"])
 @pytest.mark.parametrize(
-    "flags", [[], ["--detailed", "--no-color"], ["--account", "alt"]]
+    "flags", [[], ["--detailed", "--no-color"], ["--profile", "alt"]]
 )
 def test_alias_and_status_game_render_equivalently(
     runner: CliRunner, status_gateway: AsyncMock, game: str, flags: list[str]
@@ -426,7 +431,7 @@ def test_alias_and_status_game_render_equivalently(
     assert alias.output == explicit.output
     if game == "hsr":
         assert "Test assignment A" in alias.output
-    if flags == ["--account", "alt"]:
+    if flags == ["--profile", "alt"]:
         assert "alt" in alias.output
 
 
@@ -535,17 +540,17 @@ def test_cached_status_requires_current_selected_uid(
     change_uid: bool,
 ) -> None:
     assert runner.invoke(main, []).exit_code == 0
-    assert runner.invoke(main, ["--account", "alt"]).exit_code == 0
+    assert runner.invoke(main, ["--profile", "alt"]).exit_code == 0
     before = {path: path.read_bytes() for path in (tmp_path / "cache").rglob("*.json")}
     config_file = tmp_path / ".hoyo/config.toml"
     config = load_config(config_file)
-    account = config.accounts["main"]
+    account = config.profiles["main"]
     selected_uid = account.games["genshin"].uid + int(change_uid)
-    save_account(
+    save_profile(
         config_file,
         "main",
-        AccountConfig(
-            account.credential_backend,
+        ProfileSeed(
+            config.logins[account.login].credential_backend,
             {**account.games, "genshin": GameSelection(True, selected_uid)},
         ),
         make_default=True,
@@ -618,7 +623,7 @@ def test_cli_checks_cache_age_after_awaited_failed_request(
         "disabled",
         "unconfigured",
         "no-enabled",
-        "account",
+        "profile",
         "missing-credentials",
         "malformed-credentials",
         "missing-config",
@@ -638,17 +643,17 @@ def test_status_preflight_failures_prevent_requests(
         }
         if case == "disabled":
             games["hsr"] = GameSelection(False, 222222222)
-        save_account(
+        save_profile(
             tmp_path / ".hoyo/config.toml",
             "main",
-            AccountConfig("plaintext", games),
+            ProfileSeed("plaintext", games),
             make_default=True,
             game_order=(),
         )
         if case == "no-enabled":
             arguments = []
-    elif case == "account":
-        arguments = ["--account", "ma"]
+    elif case == "profile":
+        arguments = ["--profile", "ma"]
     elif case in ("missing-credentials", "malformed-credentials"):
         expected = 3
     with (
@@ -748,10 +753,10 @@ def test_checkin_zzz_scope_and_exact_account_override(
 ) -> None:
     from hoyo_cli.commands import check_in
 
-    save_account(
+    save_profile(
         tmp_path / ".hoyo/config.toml",
         "alt",
-        AccountConfig("plaintext", {"zzz": GameSelection(True, 444444444)}),
+        ProfileSeed("plaintext", {"zzz": GameSelection(True, 444444444)}),
         make_default=False,
         game_order=("zzz", "hsr", "genshin"),
     )
@@ -760,12 +765,12 @@ def test_checkin_zzz_scope_and_exact_account_override(
     )
     arguments = ["check-in", "zzz"]
     if placement == "root":
-        arguments = ["--account", "alt", "--no-color"] + arguments
+        arguments = ["--profile", "alt", "--no-color"] + arguments
     elif placement == "local":
-        arguments += ["--account", "alt", "--no-color"]
+        arguments += ["--profile", "alt", "--no-color"]
     else:
-        arguments = ["--account", "main", "--no-color"] + arguments
-        arguments += ["--account", "alt"]
+        arguments = ["--profile", "main", "--no-color"] + arguments
+        arguments += ["--profile", "alt"]
     with patch.object(
         check_in, "GenshinPyGateway", return_value=check_in_gateway
     ) as make:
@@ -984,7 +989,7 @@ def test_command_cancellation_stops_live_progress_before_error(
         "disabled",
         "unconfigured",
         "no-enabled",
-        "account",
+        "profile",
         "missing-credentials",
         "malformed-credentials",
         "missing-config",
@@ -1004,17 +1009,17 @@ def test_checkin_preflight_failures_prevent_requests(
         }
         if case == "disabled":
             games["hsr"] = GameSelection(False, 222222222)
-        save_account(
+        save_profile(
             tmp_path / ".hoyo/config.toml",
             "main",
-            AccountConfig("plaintext", games),
+            ProfileSeed("plaintext", games),
             make_default=True,
             game_order=(),
         )
         if case == "no-enabled":
             arguments = ["check-in"]
-    elif case == "account":
-        arguments += ["--account", "ma"]
+    elif case == "profile":
+        arguments += ["--profile", "ma"]
     elif case in ("missing-credentials", "malformed-credentials"):
         expected = 3
     with (

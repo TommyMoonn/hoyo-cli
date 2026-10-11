@@ -11,6 +11,7 @@ from unittest.mock import patch
 import pytest
 import tomlkit
 from click.testing import CliRunner
+from profile_fixtures import ProfileSeed, save_profile
 from tomlkit.toml_document import TOMLDocument
 
 from hoyo_cli.cli import main
@@ -18,18 +19,17 @@ from hoyo_cli.commands.config import edit_config, show_config
 from hoyo_cli.config import repository
 from hoyo_cli.config.editor import ResolvedEditor, parse_editor_arguments
 from hoyo_cli.config.models import (
-    AccountConfig,
     GameSelection,
+    ProfileConfig,
     enabled_games,
     parse_config,
-    resolve_account,
+    resolve_profile,
 )
 from hoyo_cli.config.paths import cache_root, config_path, credentials_path
 from hoyo_cli.config.repository import (
     commit_config,
     load_config,
     prepare_game_order,
-    save_account,
 )
 from hoyo_cli.errors import ConfigError
 from hoyo_cli.models.common import GameId
@@ -41,10 +41,10 @@ def _fake_executable(name: str) -> str:
 
 def test_save_refuses_detected_symlink_before_io(tmp_path: Path) -> None:
     path = tmp_path / "config.toml"
-    account = AccountConfig("keyring", {"genshin": GameSelection(True, 111111111)})
+    account = ProfileSeed("keyring", {"genshin": GameSelection(True, 111111111)})
     with patch.object(Path, "is_symlink", return_value=True):
         with pytest.raises(ConfigError, match="symbolic link"):
-            save_account(path, "main", account, make_default=True, game_order=())
+            save_profile(path, "main", account, make_default=True, game_order=())
     assert not path.exists()
 
 
@@ -133,9 +133,9 @@ def test_save_refuses_symlink_without_changing_target(
         path.symlink_to(target)
     except OSError as error:
         pytest.skip(f"Symlink creation is unavailable: {error}")
-    account = parse_config(config_document).accounts["main"]
+    account = parse_config(config_document).profiles["main"]
     with pytest.raises(ConfigError, match="symbolic link"):
-        save_account(path, "main", account, make_default=True, game_order=())
+        save_profile(path, "main", account, make_default=True, game_order=())
     assert path.is_symlink()
     assert target.read_bytes() == original if not dangling else not target.exists()
     assert not list(tmp_path.glob("*.tmp"))
@@ -145,8 +145,8 @@ def test_save_refuses_symlink_without_changing_target(
 def config_document() -> TOMLDocument:
     return tomlkit.parse(
         """# Keep this comment
-version = 1
-default_account = "main"
+version = 2
+default_profile = "main"
 game_order = ["zzz", "genshin"]
 unknown_root = "private-marker"
 
@@ -154,27 +154,33 @@ unknown_root = "private-marker"
 color = "auto"
 unknown_display = "keep"
 
-[accounts.main]
+[logins.main]
 credential_backend = "keyring" # backend comment
+credential_key = "main"
+[profiles.main]
+login = "main"
 unknown_account = "private-marker"
 
-[accounts.main.games.genshin]
+[profiles.main.games.genshin]
 enabled = true
 uid = 111111111 # UID comment
 unknown_game = "keep"
 
-[accounts.main.games.hsr]
+[profiles.main.games.hsr]
 enabled = true
 uid = 222222222
 
-[accounts.main.games.zzz]
+[profiles.main.games.zzz]
 enabled = false
 uid = 333333333
 
-[accounts.alt]
+[logins.alt]
 credential_backend = "plaintext"
+credential_key = "alt"
+[profiles.alt]
+login = "alt"
 
-[accounts.alt.games.zzz]
+[profiles.alt.games.zzz]
 enabled = true
 uid = 444444444
 """
@@ -183,26 +189,26 @@ uid = 444444444
 
 def test_v1_example_parses(config_document: TOMLDocument) -> None:
     config = parse_config(config_document)
-    assert config.version == 1
-    assert config.default_account == "main"
+    assert config.version == 2
+    assert config.default_profile == "main"
     assert config.game_order == ("zzz", "genshin")
     assert config.display_color == "auto"
-    assert config.accounts["main"].games["hsr"].uid == 222222222
-    assert config.accounts["alt"].credential_backend == "plaintext"
+    assert config.profiles["main"].games["hsr"].uid == 222222222
+    assert config.logins["alt"].credential_backend == "plaintext"
 
 
 def test_exact_account_match(config_document: TOMLDocument) -> None:
     config = parse_config(config_document)
-    assert resolve_account(config, "alt") == ("alt", config.accounts["alt"])
-    assert resolve_account(config, None)[0] == "main"
+    assert resolve_profile(config, "alt") == ("alt", config.profiles["alt"])
+    assert resolve_profile(config, None)[0] == "main"
     for requested in ("a", "Alt", " main", "unknown"):
         with pytest.raises(ConfigError):
-            resolve_account(config, requested)
+            resolve_profile(config, requested)
 
 
 def test_missing_default_does_not_fall_back(config_document: TOMLDocument) -> None:
-    config_document["default_account"] = "missing"
-    with pytest.raises(ConfigError, match="default_account"):
+    config_document["default_profile"] = "missing"
+    with pytest.raises(ConfigError, match="default_profile"):
         parse_config(config_document)
 
 
@@ -210,11 +216,11 @@ def test_game_order_appends_enabled_unlisted_games(
     config_document: TOMLDocument,
 ) -> None:
     config = parse_config(config_document)
-    assert enabled_games(config, config.accounts["main"]) == ("genshin", "hsr")
+    assert enabled_games(config, config.profiles["main"]) == ("genshin", "hsr")
     config_document["game_order"] = []
-    config_document["accounts"]["main"]["games"]["zzz"]["enabled"] = True
+    config_document["profiles"]["main"]["games"]["zzz"]["enabled"] = True
     config = parse_config(config_document)
-    assert enabled_games(config, config.accounts["main"]) == ("genshin", "hsr", "zzz")
+    assert enabled_games(config, config.profiles["main"]) == ("genshin", "hsr", "zzz")
 
 
 @pytest.mark.parametrize("order", [["hsr", "hsr"], ["unknown"], [True], "genshin"])
@@ -228,8 +234,8 @@ def test_duplicate_or_unknown_game_order_fails(
 
 @pytest.mark.parametrize("uid", ["private-marker", True, 0, -1, 1.5])
 def test_bad_uid_reports_field_path(config_document: TOMLDocument, uid: object) -> None:
-    config_document["accounts"]["main"]["games"]["hsr"]["uid"] = uid
-    with pytest.raises(ConfigError, match=r"accounts.main.games.hsr.uid") as caught:
+    config_document["profiles"]["main"]["games"]["hsr"]["uid"] = uid
+    with pytest.raises(ConfigError, match=r"profiles.main.games.hsr.uid") as caught:
         parse_config(config_document)
     assert caught.value.exit_code == 2
     assert "private-marker" not in str(caught.value)
@@ -237,20 +243,20 @@ def test_bad_uid_reports_field_path(config_document: TOMLDocument, uid: object) 
 
 def test_no_enabled_games_is_error(config_document: TOMLDocument) -> None:
     for game in ("genshin", "hsr", "zzz"):
-        config_document["accounts"]["main"]["games"][game]["enabled"] = False
+        config_document["profiles"]["main"]["games"][game]["enabled"] = False
     config = parse_config(config_document)
     with pytest.raises(ConfigError, match="enabled games"):
-        enabled_games(config, config.accounts["main"])
+        enabled_games(config, config.profiles["main"])
 
 
 @pytest.mark.parametrize(
     ("key", "value"),
     [
         ("version", True),
-        ("version", 2),
-        ("default_account", ""),
-        ("default_account", 1),
-        ("accounts", []),
+        ("version", 3),
+        ("default_profile", ""),
+        ("default_profile", 1),
+        ("profiles", []),
         ("display", "private-marker"),
     ],
 )
@@ -263,7 +269,7 @@ def test_invalid_root_fields_are_classified(
 
 
 @pytest.mark.parametrize(
-    "key", ["version", "default_account", "game_order", "display", "accounts"]
+    "key", ["version", "default_profile", "game_order", "display", "profiles"]
 )
 def test_missing_required_fields(config_document: TOMLDocument, key: str) -> None:
     del config_document[key]
@@ -275,7 +281,7 @@ def test_missing_required_fields(config_document: TOMLDocument, key: str) -> Non
     ("section", "field", "value"),
     [
         ("display", "color", "private-marker"),
-        ("account", "credential_backend", "private-marker"),
+        ("profile", "credential_backend", "private-marker"),
         ("game", "enabled", "yes"),
         ("game", "enabled", 1),
     ],
@@ -284,10 +290,10 @@ def test_nested_fields_are_validated(
     config_document: TOMLDocument, section: str, field: str, value: object
 ) -> None:
     table = config_document["display"]
-    if section == "account":
-        table = config_document["accounts"]["main"]
+    if section == "profile":
+        table = config_document["logins"]["main"]
     elif section == "game":
-        table = config_document["accounts"]["main"]["games"]["hsr"]
+        table = config_document["profiles"]["main"]["games"]["hsr"]
     table[field] = value
     with pytest.raises(ConfigError, match=field) as caught:
         parse_config(config_document)
@@ -299,13 +305,13 @@ def test_config_models_are_immutable(config_document: TOMLDocument) -> None:
     with pytest.raises(FrozenInstanceError):
         config.__setattr__("version", 2)
     with pytest.raises(TypeError):
-        cast(MutableMapping[str, AccountConfig], config.accounts)["other"] = (
-            config.accounts["main"]
+        cast(MutableMapping[str, ProfileConfig], config.profiles)["other"] = (
+            config.profiles["main"]
         )
     with pytest.raises(TypeError):
-        cast(MutableMapping[GameId, GameSelection], config.accounts["main"].games)[
+        cast(MutableMapping[GameId, GameSelection], config.profiles["main"].games)[
             "zzz"
-        ] = config.accounts["main"].games["hsr"]
+        ] = config.profiles["main"].games["hsr"]
 
 
 def test_config_paths_use_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -330,28 +336,28 @@ def test_round_trip_preserves_comments_unknown_keys_and_order(
     path = tmp_path / "config.toml"
     original = tomlkit.dumps(config_document)
     path.write_text(original, encoding="utf-8")
-    account = AccountConfig(
+    account = ProfileSeed(
         "plaintext",
         {
             "genshin": GameSelection(False, 999999999),
             "hsr": GameSelection(True, 222222222),
         },
     )
-    save_account(path, "main", account, make_default=False, game_order=("hsr",))
+    save_profile(path, "main", account, make_default=False, game_order=("hsr",))
     updated = path.read_text(encoding="utf-8")
     assert "# Keep this comment" in updated
     assert "# backend comment" in updated
     assert "# UID comment" in updated
-    assert original[original.index("[accounts.alt]") :] in updated
+    assert original[original.index("[profiles.alt]") :] in updated
     document = tomlkit.parse(updated)
     assert document["unknown_root"] == "private-marker"
     assert document["display"]["unknown_display"] == "keep"
-    assert document["accounts"]["main"]["unknown_account"] == "private-marker"
-    assert document["accounts"]["main"]["games"]["genshin"]["unknown_game"] == "keep"
-    assert updated.index("[accounts.main]") < updated.index("[accounts.alt]")
+    assert document["profiles"]["main"]["unknown_account"] == "private-marker"
+    assert document["profiles"]["main"]["games"]["genshin"]["unknown_game"] == "keep"
+    assert updated.index("[profiles.main]") < updated.index("[profiles.alt]")
     config = load_config(path)
-    assert config.accounts["main"].games["genshin"].uid == 999999999
-    assert config.accounts["alt"].games["zzz"].uid == 444444444
+    assert config.profiles["main"].games["genshin"].uid == 999999999
+    assert config.profiles["alt"].games["zzz"].uid == 444444444
     assert config.game_order == ("hsr",)
 
 
@@ -365,10 +371,10 @@ def test_invalid_existing_config_is_not_rewritten(
     original = invalid.encode("utf-8")
     path.write_bytes(original)
     with pytest.raises(ConfigError):
-        save_account(
+        save_profile(
             path,
             "main",
-            parse_config(config_document).accounts["main"],
+            parse_config(config_document).profiles["main"],
             make_default=True,
             game_order=("hsr",),
         )
@@ -388,10 +394,10 @@ def test_write_interruption_preserves_original_bytes(
         side_effect=OSError("private-marker"),
     ):
         with pytest.raises(ConfigError) as caught:
-            save_account(
+            save_profile(
                 path,
                 "main",
-                parse_config(config_document).accounts["main"],
+                parse_config(config_document).profiles["main"],
                 make_default=True,
                 game_order=("hsr",),
             )
@@ -402,13 +408,13 @@ def test_write_interruption_preserves_original_bytes(
 
 def test_new_config_creates_only_non_secret_fields(tmp_path: Path) -> None:
     path = tmp_path / ".hoyo/config.toml"
-    account = AccountConfig("keyring", {"genshin": GameSelection(True, 111111111)})
-    save_account(path, "Main.Exact", account, make_default=False, game_order=())
+    account = ProfileSeed("keyring", {"genshin": GameSelection(True, 111111111)})
+    save_profile(path, "Main.Exact", account, make_default=False, game_order=())
     config = load_config(path)
-    assert config.default_account == "Main.Exact"
-    assert config.accounts["Main.Exact"] == account
+    assert config.default_profile == "Main.Exact"
+    assert config.profiles["Main.Exact"].games == account.games
     assert config.display_color == "auto"
-    assert enabled_games(config, account) == ("genshin",)
+    assert enabled_games(config, config.profiles["Main.Exact"]) == ("genshin",)
     assert not credentials_path(tmp_path).exists()
 
 
@@ -418,9 +424,9 @@ def test_save_invalid_new_account_preserves_original(
     path = tmp_path / "config.toml"
     original = tomlkit.dumps(config_document).encode("utf-8")
     path.write_bytes(original)
-    account = AccountConfig("keyring", {"genshin": GameSelection(True, 0)})
+    account = ProfileSeed("keyring", {"genshin": GameSelection(True, 0)})
     with pytest.raises(ConfigError):
-        save_account(path, "main", account, make_default=True, game_order=("genshin",))
+        save_profile(path, "main", account, make_default=True, game_order=("genshin",))
     assert path.read_bytes() == original
 
 
@@ -431,7 +437,7 @@ def test_read_never_appends_missing_order_to_file(
     original = tomlkit.dumps(config_document).replace("\n", "\r\n").encode("utf-8")
     path.write_bytes(original)
     config = load_config(path)
-    assert enabled_games(config, config.accounts["main"]) == ("genshin", "hsr")
+    assert enabled_games(config, config.profiles["main"]) == ("genshin", "hsr")
     assert path.read_bytes() == original
 
 
@@ -451,7 +457,7 @@ def test_load_failures_report_path_without_raw_values(
 def test_config_shows_paths_names_and_uids_not_secrets(
     tmp_path: Path, config_document: TOMLDocument
 ) -> None:
-    config_document["accounts"]["main"]["ltoken"] = "private-marker"
+    config_document["profiles"]["main"]["ltoken"] = "private-marker"
     config_document["display"]["secret"] = "private-marker"
     output = show_config(parse_config(config_document), tmp_path / "config.toml")
     for expected in (
@@ -470,7 +476,7 @@ def test_config_shows_paths_names_and_uids_not_secrets(
     assert "ltoken" not in output
     assert "zzz: disabled, UID 333333333" in output
     assert "genshin: not configured" in output
-    assert "hoyo config order" in output and "hoyo account edit NAME" in output
+    assert "hoyo config order" in output and "hoyo profile edit <name>" in output
 
 
 @pytest.mark.parametrize("width", [48, 70, 100])
@@ -481,8 +487,8 @@ def test_config_inspection_preserves_long_names_and_disabled_selections_without_
     width: int,
 ) -> None:
     name = "A long account name [with brackets] and several servers"
-    config_document["accounts"][name] = config_document["accounts"].pop("main")
-    config_document["default_account"] = name
+    config_document["profiles"][name] = config_document["profiles"].pop("main")
+    config_document["default_profile"] = name
     config = tmp_path / "config.toml"
     config.write_text(tomlkit.dumps(config_document), encoding="utf-8")
     before = config.read_bytes()
@@ -494,13 +500,13 @@ def test_config_inspection_preserves_long_names_and_disabled_selections_without_
     ):
         result = runner.invoke(main, ["config", "--no-color"], terminal_width=width)
     assert result.exit_code == 0, result.output
-    assert f"Default account: {name}" in result.output
-    assert f"Account: {name}" in result.output
+    assert f"Default profile: {name}" in result.output
+    assert f"Profile: {name}" in result.output
     assert "zzz: disabled, UID 333333333" in result.output
     assert "hsr: not configured" in result.output
     assert (
         "hoyo config order" in result.output
-        and "hoyo account edit NAME" in result.output
+        and "hoyo profile edit <name>" in result.output
     )
     assert "private-marker" not in result.output and "\x1b" not in result.output
     store.assert_not_called()
@@ -589,11 +595,11 @@ def test_config_cli_checks_exact_account(
     path = tmp_path / "config.toml"
     path.write_text(tomlkit.dumps(config_document), encoding="utf-8")
     with patch("hoyo_cli.commands.config.config_path", return_value=path):
-        valid = runner.invoke(main, ["--account", "alt", "config"])
-        invalid = runner.invoke(main, ["config", "--account", "a"])
+        valid = runner.invoke(main, ["--profile", "alt", "config"])
+        invalid = runner.invoke(main, ["config", "--profile", "a"])
     assert valid.exit_code == 0
     assert invalid.exit_code == 2
-    assert "--account" in invalid.output
+    assert "--profile" in invalid.output
     assert "Traceback" not in invalid.output
 
 
@@ -656,18 +662,18 @@ def test_config_cli_no_editor_is_actionable(
 def test_resolver_never_substitutes_another_default(
     config_document: TOMLDocument,
 ) -> None:
-    config = replace(parse_config(config_document), default_account="missing")
-    with pytest.raises(ConfigError, match="default_account"):
-        resolve_account(config, None)
-    assert resolve_account(config, "alt")[0] == "alt"
+    config = replace(parse_config(config_document), default_profile="missing")
+    with pytest.raises(ConfigError, match="default_profile"):
+        resolve_profile(config, None)
+    assert resolve_profile(config, "alt")[0] == "alt"
 
 
 def test_unknown_game_configuration_is_rejected(config_document: TOMLDocument) -> None:
-    config_document["accounts"]["main"]["games"]["unknown"] = {
+    config_document["profiles"]["main"]["games"]["unknown"] = {
         "enabled": True,
         "uid": 1,
     }
-    with pytest.raises(ConfigError, match=r"accounts.main.games"):
+    with pytest.raises(ConfigError, match=r"profiles.main.games"):
         parse_config(config_document)
 
 
@@ -675,13 +681,13 @@ def test_model_snapshots_do_not_retain_mutable_inputs(
     config_document: TOMLDocument,
 ) -> None:
     games: dict[GameId, GameSelection] = {"genshin": GameSelection(True, 111111111)}
-    account = AccountConfig("keyring", games)
+    account = ProfileConfig("main", games)
     games.clear()
     assert "genshin" in account.games
     accounts = {"main": account}
-    config = replace(parse_config(config_document), accounts=accounts)
+    config = replace(parse_config(config_document), profiles=accounts)
     accounts.clear()
-    assert "main" in config.accounts
+    assert "main" in config.profiles
 
 
 def test_noop_save_preserves_line_endings_and_formatting(
@@ -691,10 +697,10 @@ def test_noop_save_preserves_line_endings_and_formatting(
     original = tomlkit.dumps(config_document).replace("\n", "\r\n").encode("utf-8")
     path.write_bytes(original)
     config = load_config(path)
-    save_account(
+    save_profile(
         path,
         "main",
-        config.accounts["main"],
+        config.profiles["main"],
         make_default=False,
         game_order=config.game_order,
     )
@@ -709,30 +715,30 @@ def test_replace_uses_a_closed_same_directory_temporary_file(
     with patch(
         "hoyo_cli.config.repository.os.replace", wraps=os.replace
     ) as replace_file:
-        save_account(
+        save_profile(
             path,
             "alt",
-            parse_config(config_document).accounts["alt"],
+            parse_config(config_document).profiles["alt"],
             make_default=True,
             game_order=("zzz",),
         )
     source, destination = replace_file.call_args.args
     assert source.parent == destination.parent == tmp_path
     assert not source.exists()
-    assert load_config(path).default_account == "alt"
+    assert load_config(path).default_profile == "alt"
 
 
 @pytest.mark.parametrize("uid", [True, 1.0])
 def test_save_rejects_same_value_with_wrong_type(
     tmp_path: Path, config_document: TOMLDocument, uid: object
 ) -> None:
-    config_document["accounts"]["main"]["games"]["genshin"]["uid"] = 1
+    config_document["profiles"]["main"]["games"]["genshin"]["uid"] = 1
     path = tmp_path / "config.toml"
     original = tomlkit.dumps(config_document).encode("utf-8")
     path.write_bytes(original)
-    account = AccountConfig("keyring", {"genshin": GameSelection(True, cast(int, uid))})
+    account = ProfileSeed("keyring", {"genshin": GameSelection(True, cast(int, uid))})
     with pytest.raises(ConfigError, match="uid"):
-        save_account(path, "main", account, make_default=False, game_order=("genshin",))
+        save_profile(path, "main", account, make_default=False, game_order=("genshin",))
     assert path.read_bytes() == original
 
 
@@ -740,9 +746,9 @@ def test_inspection_handles_accounts_with_no_enabled_games(
     config_document: TOMLDocument, tmp_path: Path
 ) -> None:
     for game in ("genshin", "hsr", "zzz"):
-        config_document["accounts"]["main"]["games"][game]["enabled"] = False
+        config_document["profiles"]["main"]["games"][game]["enabled"] = False
     output = show_config(parse_config(config_document), tmp_path / "config.toml")
-    assert "Account: main" in output
+    assert "Profile: main" in output
     assert "No enabled games" in output
 
 

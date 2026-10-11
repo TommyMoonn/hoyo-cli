@@ -12,7 +12,7 @@ from test_init import FakeBrowser, FakeDiscovery, FakeIO, run_init
 from hoyo_cli.auth.credentials import Credentials
 from hoyo_cli.auth.plaintext_backend import PlaintextStore
 from hoyo_cli.cli import main
-from hoyo_cli.commands.init import run_add_account, run_edit_account
+from hoyo_cli.commands.init import run_add_profile, run_edit_profile
 from hoyo_cli.config.repository import load_config
 from hoyo_cli.errors import AppError
 from hoyo_cli.hoyolab.discovery import CharacterRef
@@ -47,9 +47,9 @@ def test_initialized_init_is_read_only_and_never_opens_setup(
         result = runner.invoke(main, ["init"])
     assert result.exit_code == 0, result.output
     for command in (
-        "hoyo account add",
-        "hoyo account edit NAME",
-        "hoyo account use NAME",
+        "hoyo profile add",
+        "hoyo profile edit <name>",
+        "hoyo profile use <name>",
         "hoyo config",
     ):
         assert command in result.output
@@ -59,9 +59,9 @@ def test_initialized_init_is_read_only_and_never_opens_setup(
 
 
 def test_add_help_marks_name_optional_without_opening_setup(runner: CliRunner) -> None:
-    with patch("hoyo_cli.commands.init.configure_account") as setup:
-        result = runner.invoke(main, ["account", "add", "--help"])
-    assert result.exit_code == 0 and "[NAME]" in result.stdout
+    with patch("hoyo_cli.commands.init.configure_profile") as setup:
+        result = runner.invoke(main, ["profile", "add", "--help"])
+    assert result.exit_code == 0 and "[name]" in result.stdout
     setup.assert_not_called()
 
 
@@ -87,16 +87,16 @@ def test_add_creates_only_new_account_preserving_default_and_preferences(
         ),
         patch("hoyo_cli.commands.init.HoYoLABDiscovery", return_value=FakeDiscovery()),
     ):
-        result = runner.invoke(main, ["account", "add", *(["alt"] if named else [])])
+        result = runner.invoke(main, ["profile", "add", *(["alt"] if named else [])])
     assert result.exit_code == 0, result.output
     after = load_config(config)
-    assert after.default_account == before.default_account == "main"
+    assert after.default_profile == before.default_profile == "main"
     assert after.game_order == before.game_order
     assert after.display_color == before.display_color == "never"
-    assert after.accounts["main"] == before.accounts["main"]
-    assert "alt" in after.accounts and secrets.exists()
+    assert after.profiles["main"] == before.profiles["main"]
+    assert "alt" in after.profiles and secrets.exists()
     assert '[editor]\ncommand = ["future-editor", "--wait"]' in config.read_text()
-    assert ("Account name" in io.prompts) is not named
+    assert ("Profile name" in io.prompts) is not named
     assert not any("default" in prompt or "order" in prompt for prompt in io.prompts)
 
 
@@ -112,12 +112,12 @@ def test_duplicate_add_and_unknown_edit_fail_before_authentication(
         patch("hoyo_cli.commands.init.HoYoLABDiscovery") as discovery,
         patch("hoyo_cli.commands.init.open_store") as store,
     ):
-        result = runner.invoke(main, ["account", action, name])
+        result = runner.invoke(main, ["profile", action, name])
     assert result.exit_code == 2, result.output
     assert (
-        "hoyo account edit" in result.stderr
+        "hoyo profile edit" in result.stderr
         if action == "add"
-        else "hoyo account" in result.stderr
+        else "hoyo profile" in result.stderr
     )
     for dependency in (browser, discovery, store):
         dependency.assert_not_called()
@@ -128,7 +128,7 @@ def test_edit_alt_preserves_main_default_preferences_and_other_credentials(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     config, secrets = initialize(tmp_path, monkeypatch)
-    run_add_account(config, secrets, FakeIO(name="alt"), FakeBrowser(), FakeDiscovery())
+    run_add_profile(config, secrets, FakeIO(name="alt"), FakeBrowser(), FakeDiscovery())
     before = config.read_bytes(), secrets.read_bytes()
 
     class DisableIO(FakeIO):
@@ -138,21 +138,21 @@ def test_edit_alt_preserves_main_default_preferences_and_other_credentials(
             return super().choose(prompt, choices)
 
     with patch("hoyo_cli.commands.init.open_store") as store:
-        run_edit_account(
+        run_edit_profile(
             config,
             secrets,
             DisableIO(action="Games and characters"),
             FakeBrowser(),
             FakeDiscovery(),
-            requested_account="alt",
+            requested_profile="alt",
         )
     store.assert_not_called()
     assert config.read_bytes() == before[0].replace(
-        b"[accounts.alt.games.hsr]\nenabled = true",
-        b"[accounts.alt.games.hsr]\nenabled = false",
+        b"[profiles.alt.games.hsr]\nenabled = true",
+        b"[profiles.alt.games.hsr]\nenabled = false",
     )
     assert secrets.read_bytes() == before[1]
-    assert load_config(config).default_account == "main"
+    assert load_config(config).default_profile == "main"
 
 
 @pytest.mark.parametrize("stage", ["selection", "confirmation"])
@@ -209,9 +209,10 @@ def test_edit_menu_has_only_account_actions_and_preserves_global_bytes(
 
     class EditIO(FakeIO):
         def choose(self, prompt: str, choices: Sequence[str]) -> str:
-            if prompt == "Account settings":
+            if prompt == "Profile settings":
                 assert tuple(choices) == (
                     "Games and characters",
+                    "Change linked login",
                     "Update HoYoLAB session",
                     "Credential storage",
                     "Cancel (no changes)",
@@ -225,12 +226,12 @@ def test_edit_menu_has_only_account_actions_and_preserves_global_bytes(
         patch("hoyo_cli.commands.init.ClickSetupIO", return_value=EditIO()),
         patch("hoyo_cli.commands.init.open_store") as store,
     ):
-        result = runner.invoke(main, ["account", "edit", "main"])
+        result = runner.invoke(main, ["profile", "edit", "main"])
     assert result.exit_code == 0, result.output
     store.assert_not_called()
     assert config.read_bytes() == before[0].replace(
-        b"[accounts.main.games.hsr]\nenabled = true",
-        b"[accounts.main.games.hsr]\nenabled = false",
+        b"[profiles.main.games.hsr]\nenabled = true",
+        b"[profiles.main.games.hsr]\nenabled = false",
     )
     assert secrets.read_bytes() == before[1]
 
@@ -242,12 +243,12 @@ def test_global_order_is_targeted_and_never_resolves_account_or_reads_secrets(
     before = config.read_bytes(), secrets.read_bytes()
     with (
         patch("hoyo_cli.commands.init.open_store") as store,
-        patch("hoyo_cli.commands.config.resolve_account") as resolve,
+        patch("hoyo_cli.commands.config.resolve_profile") as resolve,
         patch("hoyo_cli.commands.init.SystemBrowserImporter") as browser,
         patch("hoyo_cli.commands.init.HoYoLABDiscovery") as discovery,
     ):
         result = runner.invoke(
-            main, ["--account", "unknown", "config", "order"], input="n\n3\n2\n1\n1\n"
+            main, ["--profile", "unknown", "config", "order"], input="n\n3\n2\n1\n1\n"
         )
     assert result.exit_code == 0, result.output
     assert config.read_bytes() == before[0].replace(
@@ -260,22 +261,25 @@ def test_global_order_is_targeted_and_never_resolves_account_or_reads_secrets(
 
 
 @pytest.mark.parametrize(
-    "arguments", [["init", "--account", "main"], ["--account", "main", "init"]]
+    "arguments", [["init", "--profile", "main"], ["--profile", "main", "init"]]
 )
 def test_init_account_override_is_rejected_with_edit_guidance(
     runner: CliRunner, arguments: list[str]
 ) -> None:
     result = runner.invoke(main, arguments)
     assert result.exit_code == 2
-    assert "hoyo account edit NAME" in result.output
+    assert (
+        "hoyo profile edit <name>" in result.output
+        or "No such option '--profile'" in result.output
+    )
 
 
 @pytest.mark.parametrize(
     "arguments",
     [
         ["init"],
-        ["account", "add", "alt"],
-        ["account", "edit", "main"],
+        ["profile", "add", "alt"],
+        ["profile", "edit", "main"],
         ["config", "order"],
     ],
 )
@@ -311,7 +315,7 @@ def test_account_setup_failures_preserve_exact_account_and_secret_bytes(
         name="alt" if mode == "add" else "main",
         cancel="Save" if failure == "cancel" else "",
     )
-    operation = run_add_account if mode == "add" else run_edit_account
+    operation = run_add_profile if mode == "add" else run_edit_profile
     expected = (
         click.Abort
         if failure == "cancel"
@@ -359,7 +363,7 @@ def test_account_setup_failures_preserve_exact_account_and_secret_bytes(
                 io,
                 FakeBrowser(),
                 discovery,
-                requested_account="alt" if mode == "add" else "main",
+                requested_profile="alt" if mode == "add" else "main",
             )
     assert secrets.read_bytes() == original[1]
     assert config.read_bytes() == original[0] + (
@@ -367,12 +371,12 @@ def test_account_setup_failures_preserve_exact_account_and_secret_bytes(
         if failure == "conflict-during-discovery"
         else b""
     )
-    assert set(load_config(config).accounts) == {"main"}
+    assert set(load_config(config).profiles) == {"main"}
 
 
 @pytest.mark.parametrize(
     "arguments",
-    [["account", "add", "alt"], ["account", "edit", "main"], ["config", "order"]],
+    [["profile", "add", "alt"], ["profile", "edit", "main"], ["config", "order"]],
 )
 def test_management_commands_require_initial_setup_without_creating_files(
     tmp_path: Path,

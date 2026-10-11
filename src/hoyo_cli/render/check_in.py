@@ -12,7 +12,7 @@ from hoyo_cli.render.errors import format_error
 from hoyo_cli.render.styles import GAME_HEADINGS
 
 
-def render_check_in(results: Sequence[CheckInResult], *, account: str) -> Group:
+def render_check_in(results: Sequence[CheckInResult], *, profile: str) -> Group:
     rows: list[Table | Padding] = []
     name_width = max((len(GAME_HEADINGS[result.game]) for result in results), default=0)
     for result in results:
@@ -42,4 +42,4 @@ def render_check_in(results: Sequence[CheckInResult], *, account: str) -> Group:
                 style="warning" if result.outcome == "unconfirmed" else "error",
             )
             rows.append(Padding(detail, (0, 0, 0, 2)))
-    return Group(Text(f"Check-in · {account}", style="heading"), *rows)
+    return Group(Text(f"Check-in · {profile}", style="heading"), *rows)

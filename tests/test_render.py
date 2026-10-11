@@ -58,7 +58,7 @@ def test_check_in_labels_and_subordinate_hints_wrap_cleanly(
         width=width, no_color=not color, interactive=color, configured_color="auto"
     )
     with console.capture() as captured:
-        console.print(render_check_in(results, account="main"))
+        console.print(render_check_in(results, profile="main"))
     output = captured.get()
     plain = Text.from_ansi(output).plain
     for label in (
@@ -317,7 +317,7 @@ def test_stale_expedition_prediction_does_not_become_finished(
                     error=NetworkError("Timeout."),
                 ),
             ),
-            account="main",
+            profile="main",
             detailed=True,
             focused=True,
             now=now,
@@ -500,7 +500,7 @@ def test_overview_stale_and_partial_failure_do_not_hide_success(
     )
     console = Console(file=StringIO(), width=70, color_system=None)
     with console.capture() as capture:
-        console.print(render_overview(results, account="main", detailed=False, now=NOW))
+        console.print(render_overview(results, profile="main", detailed=False, now=NOW))
     output = capture.get()
     assert "STALE · fetched 34m ago" in output
     assert "190 / 200" in output and "HONKAI: STAR RAIL" in output
@@ -533,7 +533,7 @@ def test_fresh_overview_footer_and_markup_are_literal(
         console.print(
             render_overview(
                 (StatusResult("genshin", status_snapshot, NOW),),
-                account="[red]main[/red]",
+                profile="[red]main[/red]",
                 detailed=False,
                 now=NOW,
             )
@@ -640,7 +640,7 @@ def test_stale_age_label_belongs_to_each_game_section(
     )
     output = StringIO()
     Console(file=output, width=width, color_system=None).print(
-        render_overview(results, account="main", detailed=False, now=NOW)
+        render_overview(results, profile="main", detailed=False, now=NOW)
     )
     text = output.getvalue()
     genshin, other = text.split("HONKAI: STAR RAIL")
@@ -673,7 +673,7 @@ def test_cached_values_never_increase_over_time(game: GameId) -> None:
         Console(file=output, width=100, color_system=None).print(
             render_overview(
                 (StatusResult(game, snapshot, NOW, stale=True, error=error),),
-                account="main",
+                profile="main",
                 detailed=True,
                 now=NOW + timedelta(hours=hours),
             )
@@ -703,7 +703,7 @@ def test_cache_write_warning_is_distinct_from_fetch_error(
                     ),
                 ),
             ),
-            account="main",
+            profile="main",
             detailed=False,
             now=NOW,
         )
@@ -826,7 +826,7 @@ def test_mixed_freshness_emphasizes_only_current_actions(
                         error=NetworkError("Timeout."),
                     ),
                 ),
-                account="main",
+                profile="main",
                 detailed=False,
                 now=NOW,
             )
@@ -878,7 +878,7 @@ def test_stale_resource_times_are_snapshot_estimates(
                     game, snapshot, NOW, stale=True, error=NetworkError("Timeout.")
                 ),
             ),
-            account="main",
+            profile="main",
             detailed=detailed,
             now=render_time,
         )
@@ -960,7 +960,7 @@ def test_detailed_resource_deadlines_respect_freshness(
                     error=NetworkError("Timeout.") if stale else None,
                 ),
             ),
-            account="main",
+            profile="main",
             detailed=True,
             focused=True,
             now=render_time,

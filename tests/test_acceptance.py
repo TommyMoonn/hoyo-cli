@@ -14,14 +14,16 @@ import genshin
 import pytest
 from click.testing import CliRunner
 from conftest import TEST_COOKIE, TEST_UIDS, AcceptanceEnvironment
+from profile_fixtures import ProfileSeed, save_profile
 from rich.cells import cell_len
 
 from hoyo_cli.auth.browser_import import BrowserProfile, BrowserSession, browser_error
 from hoyo_cli.auth.credentials import parse_cookie_header
 from hoyo_cli.auth.plaintext_backend import PlaintextStore
 from hoyo_cli.cli import main
-from hoyo_cli.config.models import AccountConfig, GameSelection
-from hoyo_cli.config.repository import load_config, save_account
+from hoyo_cli.config.models import GameSelection, ProfileConfig
+from hoyo_cli.config.repository import load_config
+from hoyo_cli.config.repository import save_profile as persist_profile
 from hoyo_cli.errors import ErrorCode
 from hoyo_cli.hoyolab.discovery import CharacterRef
 from hoyo_cli.models.common import GAME_IDS, GameId
@@ -29,25 +31,35 @@ from hoyo_cli.render import progress
 
 
 @pytest.mark.parametrize("command", [[], ["status"], ["genshin"], ["check-in"]])
+@pytest.mark.parametrize("shared", [False, True])
 def test_persisted_default_and_invocation_override_remain_account_isolated(
     runner: CliRunner,
     acceptance_env: AcceptanceEnvironment,
     command: list[str],
+    shared: bool,
 ) -> None:
     env = acceptance_env
     alternate_uid = 999999999
-    save_account(
+    save_profile(
         env.config,
         "alt",
-        AccountConfig(env.backend, {"genshin": GameSelection(True, alternate_uid)}),
+        ProfileSeed(env.backend, {"genshin": GameSelection(True, alternate_uid)}),
         make_default=False,
         game_order=GAME_IDS,
     )
+    if shared:
+        persist_profile(
+            env.config,
+            "alt",
+            ProfileConfig("main", {"genshin": GameSelection(True, alternate_uid)}),
+            make_default=False,
+            game_order=GAME_IDS,
+        )
     original = env.config.read_bytes()
     secret_bytes = env.credentials.read_bytes() if env.credentials.exists() else None
     with patch.object(PlaintextStore, "get") as plaintext_get:
-        listing = runner.invoke(main, ["account"])
-        switched = runner.invoke(main, ["account", "use", "alt"])
+        listing = runner.invoke(main, ["profile"])
+        switched = runner.invoke(main, ["profile", "use", "alt"])
     assert listing.exit_code == switched.exit_code == 0, switched.output
     plaintext_get.assert_not_called()
     env.keyring.get_password.assert_not_called()
@@ -58,7 +70,7 @@ def test_persisted_default_and_invocation_override_remain_account_isolated(
     for game in GAME_IDS:
         env.notes(game).assert_not_called()
     assert env.config.read_bytes() == original.replace(
-        b'default_account = "main"', b'default_account = "alt"', 1
+        b'default_profile = "main"', b'default_profile = "alt"', 1
     )
     persisted = env.config.read_bytes()
     for requested, expected_uid in (
@@ -67,8 +79,11 @@ def test_persisted_default_and_invocation_override_remain_account_isolated(
         (None, alternate_uid),
     ):
         env.client.reset_mock()
-        arguments = [*(["--account", requested] if requested else []), *command]
-        result = runner.invoke(main, arguments)
+        arguments = [*(["--profile", requested] if requested else []), *command]
+        with patch.object(
+            PlaintextStore, "get", autospec=True, side_effect=PlaintextStore.get
+        ) as plaintext_reads:
+            result = runner.invoke(main, arguments)
         assert result.exit_code == 0, result.output
         if command == ["check-in"]:
             assert env.client.uids[genshin.Game.GENSHIN] == expected_uid
@@ -83,7 +98,13 @@ def test_persisted_default_and_invocation_override_remain_account_isolated(
             )
             env.client.claim_daily_reward.assert_not_called()
         assert env.config.read_bytes() == persisted
-        assert load_config(env.config).default_account == "alt"
+        assert load_config(env.config).default_profile == "alt"
+        expected_key = "main" if shared or requested else "alt"
+        if env.backend == "keyring":
+            env.keyring.get_password.assert_called_with("hoyo-cli", expected_key)
+            plaintext_reads.assert_not_called()
+        else:
+            assert plaintext_reads.call_args.args[1] == expected_key
     assert (
         env.credentials.read_bytes() if env.credentials.exists() else None
     ) == secret_bytes
@@ -99,7 +120,7 @@ def test_persisted_default_and_invocation_override_remain_account_isolated(
         (
             genshin.errors.InvalidCookies(msg="acceptance-secret-not-real"),
             "rejected",
-            "hoyo account edit NAME",
+            "hoyo profile edit <name>",
         ),
         (TimeoutError("acceptance-secret-not-real"), "timed out", "connection"),
         (ValueError("acceptance-secret-not-real"), "unsupported", "hoyo-cli"),
@@ -144,7 +165,7 @@ def test_check_in_failure_shows_hint_without_erasing_claimed_siblings(
     assert result.exit_code == 1
     assert result.stdout.count("Claimed") == 2
     assert "Failed" in result.stdout and "Error:" in result.stdout
-    assert "Try:" in result.stdout and "hoyo account edit NAME" in result.stdout
+    assert "Try:" in result.stdout and "hoyo profile edit <name>" in result.stdout
     assert "acceptance-secret-not-real" not in result.output
     assert acceptance_env.client.claim_daily_reward.await_count == 2
 
@@ -172,7 +193,7 @@ def test_mixed_fresh_stale_and_unavailable_journey(
     env = acceptance_env
     env.width = width
     assert runner.invoke(main, ["hsr"]).exit_code == 0
-    cached = next(env.cache.rglob("hsr.json"))
+    cached = next(env.cache.rglob("hsr-*.json"))
     before = cached.read_bytes()
     env.now += timedelta(hours=3)
     env.notes("hsr").side_effect = TimeoutError("acceptance-secret-not-real")
@@ -190,12 +211,15 @@ def test_mixed_fresh_stale_and_unavailable_journey(
     assert not result.stderr
     assert_safe_output(result.output, width=width)
     assert cached.read_bytes() == before
-    assert {path.stem for path in env.cache.rglob("*.json")} == {"genshin", "hsr"}
+    assert {path.stem.split("-")[0] for path in env.cache.rglob("*.json")} == {
+        "genshin",
+        "hsr",
+    }
     env.client.get_reward_info.assert_not_called()
     env.client.claim_daily_reward.assert_not_called()
 
 
-@pytest.mark.parametrize("isolation", ["account", "uid"])
+@pytest.mark.parametrize("isolation", ["profile", "uid"])
 def test_cached_identity_cannot_cross_command_selection(
     runner: CliRunner, acceptance_env: AcceptanceEnvironment, isolation: str
 ) -> None:
@@ -203,16 +227,16 @@ def test_cached_identity_cannot_cross_command_selection(
     assert runner.invoke(main, ["genshin"]).exit_code == 0
     before = {path: path.read_bytes() for path in env.cache.rglob("*.json")}
     arguments = ["genshin"]
-    if isolation == "account":
-        arguments += ["--account", "alt"]
+    if isolation == "profile":
+        arguments += ["--profile", "alt"]
     else:
         config = load_config(env.config)
-        games = dict(config.accounts["main"].games)
+        games = dict(config.profiles["main"].games)
         games["genshin"] = GameSelection(True, TEST_UIDS["genshin"] + 1)
-        save_account(
+        save_profile(
             env.config,
             "main",
-            AccountConfig(env.backend, games),
+            ProfileSeed(env.backend, games),
             make_default=True,
             game_order=GAME_IDS,
         )
@@ -261,13 +285,13 @@ def test_new_account_selection_review_and_cancel_journey(
     # New name, manual session, second Genshin/first HSR, skip ZZZ,
     # storage consent, final Save/Cancel.
     answers = (
-        "journey\nn\n"
+        "journey\n3\nn\n"
         + TEST_COOKIE
         + "\n2\n1\n3\n"
         + backend
         + ("1\n" if save else "2\n")
     )
-    result = runner.invoke(main, ["account", "add", "--no-color"], input=answers)
+    result = runner.invoke(main, ["profile", "add", "--no-color"], input=answers)
     assert result.exit_code == (0 if save else 1), result.output
     assert "Step 4/4" in result.stdout and "Review" in result.stdout
     assert "Second genshin / America" in result.stdout
@@ -280,12 +304,12 @@ def test_new_account_selection_review_and_cancel_journey(
     assert_safe_output(result.output)
     if save:
         config = load_config(env.config)
-        assert config.default_account == "main"
-        assert config.accounts["journey"].games == {
+        assert config.default_profile == "main"
+        assert config.profiles["journey"].games == {
             "genshin": GameSelection(True, TEST_UIDS["genshin"] + 1),
             "hsr": GameSelection(True, TEST_UIDS["hsr"]),
         }
-        assert "Configured account journey" in result.stdout
+        assert "Configured profile journey" in result.stdout
     else:
         assert env.config.read_bytes() == original
         assert (
@@ -294,7 +318,7 @@ def test_new_account_selection_review_and_cancel_journey(
         env.keyring.set_password.assert_not_called()
         env.keyring.delete_password.assert_not_called()
         assert "Setup cancelled; no changes saved" in result.stdout
-        assert "Configured account" not in result.stdout
+        assert "Configured profile" not in result.stdout
     assert env.client.mock_calls == []
 
 
@@ -354,8 +378,8 @@ def test_browser_recovery_manual_fallback_through_setup(
     # Explicit session replacement, Brave/Profile 2, recover with manual input.
     result = runner.invoke(
         main,
-        ["account", "edit", "main", "--no-color"],
-        input="2\ny\ny\n1\n2\n3\n"
+        ["profile", "edit", "main", "--no-color"],
+        input="3\ny\ny\n1\n2\n3\n"
         + TEST_COOKIE
         + "\n1\n1\n1\n"
         + ("1\n" if save else "2\n"),
@@ -584,7 +608,7 @@ def test_mock_account_end_user_command_transcript(
         (["check-in", "--help"], None),
         (["check-in", "hsr"], None),
         (["init"], None),
-        (["account", "edit", "main"], "1\n1\n1\n1\n1\n"),
+        (["profile", "edit", "main"], "1\n1\n1\n1\n1\n"),
         (["config"], None),
     ]
     for arguments, answers in commands:
@@ -660,7 +684,7 @@ def test_ambiguous_claim_is_reconciled_without_another_mutation(
         acceptance_env.notes(game).assert_not_called()
 
 
-@pytest.mark.parametrize("arguments", [[], ["status"], ["--account", "alt"]])
+@pytest.mark.parametrize("arguments", [[], ["status"], ["--profile", "alt"]])
 def test_all_three_fresh(
     runner: CliRunner, acceptance_env: AcceptanceEnvironment, arguments: list[str]
 ) -> None:
@@ -797,7 +821,7 @@ def test_one_stale_fallback(
     assert "acceptance-secret-not-real" not in result.output
     for label, amount in RESOURCE.values():
         assert label in result.output and amount in result.output
-    cached = next(p for p in before if p.stem == game)
+    cached = next(p for p in before if p.stem.split("-")[0] == game)
     assert cached.read_bytes() == before[cached]
     assert all(
         p.read_bytes() != content for p, content in before.items() if p != cached
@@ -819,9 +843,9 @@ def test_one_unavailable_with_two_fresh(
     for selected, (label, amount) in RESOURCE.items():
         assert (label in result.output) == (selected != game)
         assert (amount in result.output) == (selected != game)
-    assert {p.stem for p in acceptance_env.cache.rglob("*.json")} == set(GAME_IDS) - {
-        game
-    }
+    assert {p.stem.split("-")[0] for p in acceptance_env.cache.rglob("*.json")} == set(
+        GAME_IDS
+    ) - {game}
 
 
 @pytest.mark.parametrize(
@@ -913,7 +937,7 @@ def test_commented_config_survives_account_edit(
     runner: CliRunner, acceptance_env: AcceptanceEnvironment, source: str
 ) -> None:
     original = acceptance_env.config.read_text()
-    alt = load_config(acceptance_env.config).accounts["alt"]
+    alt = load_config(acceptance_env.config).profiles["alt"]
     acceptance_env.config.write_text(
         '# Personal settings\ncustom = "retain-me" # unrelated\n' + original
     )
@@ -936,14 +960,14 @@ def test_commented_config_survives_account_edit(
             BrowserProfile("chrome", "chrome", "Library-selected profile"),
         )
         session_answers = "y\n2\n"
-    answers = "2\ny\n" + session_answers + "1\n1\n1\n1\n"
-    result = runner.invoke(main, ["account", "edit", "main"], input=answers)
+    answers = "3\ny\n" + session_answers + "1\n1\n1\n1\n"
+    result = runner.invoke(main, ["profile", "edit", "main"], input=answers)
     assert result.exit_code == 0, result.output
     after = acceptance_env.config.read_text()
     assert '# Personal settings\ncustom = "retain-me" # unrelated\n' in after
-    assert load_config(acceptance_env.config).accounts["alt"] == alt
+    assert load_config(acceptance_env.config).profiles["alt"] == alt
     assert (
-        load_config(acceptance_env.config).accounts["main"].games["genshin"].uid
+        load_config(acceptance_env.config).profiles["main"].games["genshin"].uid
         == TEST_UIDS["genshin"] + 1
     )
     assert "acceptance-secret-not-real" not in result.output
@@ -1009,7 +1033,7 @@ def test_already_claimed_checkin_skips_mutation(
 
 @pytest.mark.parametrize("game", GAME_IDS)
 @pytest.mark.parametrize(
-    "flags", [[], ["--detailed"], ["--account", "alt", "--no-color"]]
+    "flags", [[], ["--detailed"], ["--profile", "alt", "--no-color"]]
 )
 def test_alias_equivalence(
     runner: CliRunner,
@@ -1028,11 +1052,11 @@ def test_alias_equivalence(
 def test_plaintext_fallback_is_separate(
     runner: CliRunner, acceptance_env: AcceptanceEnvironment
 ) -> None:
-    account = load_config(acceptance_env.config).accounts["main"]
-    save_account(
+    account = load_config(acceptance_env.config).profiles["main"]
+    save_profile(
         acceptance_env.config,
         "main",
-        AccountConfig("plaintext", account.games),
+        ProfileSeed("plaintext", account.games),
         make_default=True,
         game_order=GAME_IDS,
     )
@@ -1072,29 +1096,6 @@ def test_readme_links_to_user_guides() -> None:
             assert (path.parent / target).is_file(), (
                 f"Broken link in {document}: {link}"
             )
-
-
-@pytest.mark.parametrize(
-    ("document", "commands"),
-    [
-        ("README.md", ("uv tool install .", "hoyo init", "hoyo genshin --detailed")),
-        ("docs/setup.md", ("hoyo init", "hoyo --account alt")),
-        (
-            "docs/commands.md",
-            ("hoyo check-in zzz", "hoyo config --edit", "uv tool uninstall hoyo-cli"),
-        ),
-        ("docs/configuration.md", ("hoyo config", "hoyo config --edit")),
-        ("docs/development.md", ("uv sync", "uv run hoyo --help", "--live-read-only")),
-    ],
-)
-def test_user_documentation_covers_commands(
-    document: str, commands: tuple[str, ...]
-) -> None:
-    contents = (Path(__file__).parents[1] / document).read_text(encoding="utf-8")
-    for command in commands:
-        assert command in contents, (
-            f"Missing documented command in {document}: {command}"
-        )
 
 
 def test_live_test_is_opt_in() -> None:

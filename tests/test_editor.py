@@ -400,7 +400,7 @@ def test_first_run_editor_selection_is_reviewed_and_saved_atomically(
         selected = False
 
         def choose(self, prompt: str, choices: Sequence[str]) -> str:
-            if prompt == "Save account configuration and credentials?":
+            if prompt == "Save profile configuration and credentials?":
                 assert "Editor preference" in choices
                 if not self.selected:
                     self.selected = True
@@ -486,7 +486,7 @@ def test_edit_failures_are_actionable_and_preserve_user_edits(
     path.write_bytes(tomlkit.dumps(config_document).encode())
     expected = path.read_bytes()
     if failure == "schema":
-        expected = expected.replace(b"version = 1", b"version = 2")
+        expected = expected.replace(b"version = 2", b"version = 3")
 
     def edit(*args: object, **kwargs: object) -> CompletedProcess[str]:
         if failure == "launch":
@@ -534,7 +534,7 @@ def test_config_editor_cli_changes_only_global_editor_without_account_resolution
     ):
         result = runner.invoke(
             main,
-            ["--account", "unknown", "config", "editor", "--no-color"],
+            ["--profile", "unknown", "config", "editor", "--no-color"],
             input="2\n1\n",
         )
     assert result.exit_code == 0, result.output
@@ -542,9 +542,9 @@ def test_config_editor_cli_changes_only_global_editor_without_account_resolution
     assert "\x1b[" not in result.output
     after = load_config(path)
     assert after.editor_command == ("zed", "--wait")
-    assert after.accounts == original.accounts
-    assert (after.default_account, after.game_order, after.display_color) == (
-        original.default_account,
+    assert after.profiles == original.profiles
+    assert (after.default_profile, after.game_order, after.display_color) == (
+        original.default_profile,
         original.game_order,
         original.display_color,
     )

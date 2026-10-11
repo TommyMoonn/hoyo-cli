@@ -48,7 +48,7 @@ class AppError(Exception):
         *,
         code: ErrorCode = ErrorCode.UNEXPECTED,
         hint: str | None = (
-            "Retry the operation. If it persists, review your account configuration."
+            "Retry the operation. If it persists, review your profile configuration."
         ),
     ) -> None:
         super().__init__(message)
@@ -82,7 +82,7 @@ class CredentialError(AppError):
         message: str,
         *,
         code: ErrorCode = ErrorCode.CREDENTIALS_INVALID,
-        hint: str | None = "Review the credential source in hoyo account edit NAME.",
+        hint: str | None = "Review the credential source in hoyo profile edit <name>.",
     ) -> None:
         super().__init__(message, exit_code=3, code=code, hint=hint)
 
@@ -94,7 +94,7 @@ class BackendUnavailable(CredentialError):
         super().__init__(
             message,
             code=ErrorCode.BACKEND_UNAVAILABLE,
-            hint="Check the selected credential backend in hoyo account edit NAME.",
+            hint="Check the selected credential backend in hoyo profile edit <name>.",
         )
 
 
@@ -105,7 +105,7 @@ class AuthenticationError(CredentialError):
         super().__init__(
             message,
             code=ErrorCode.AUTH_REJECTED,
-            hint="Sign in to HoYoLAB again; run hoyo account edit NAME.",
+            hint="Sign in to HoYoLAB again; run hoyo profile edit <name>.",
         )
 
 
@@ -139,7 +139,7 @@ class BrowserImportError(CredentialError):
         code: ErrorCode = ErrorCode.BROWSER_IMPORT,
         hint: str | None = (
             "Retry browser import or paste a full HoYoLAB Cookie header during "
-            "account setup. Use hoyo account edit NAME for an existing account."
+            "profile setup. Use hoyo profile edit <name> for an existing profile."
         ),
     ) -> None:
         super().__init__(

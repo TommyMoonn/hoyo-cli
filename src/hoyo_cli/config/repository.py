@@ -4,6 +4,7 @@ import os
 import stat
 import tempfile
 from collections.abc import MutableMapping
+from copy import deepcopy
 from dataclasses import dataclass
 from pathlib import Path
 from typing import cast
@@ -14,10 +15,11 @@ from tomlkit.items import Item
 from tomlkit.toml_document import TOMLDocument
 
 from hoyo_cli.config.models import (
-    AccountConfig,
     AppConfig,
+    LoginConfig,
+    ProfileConfig,
     parse_config,
-    resolve_account,
+    resolve_profile,
     validate_editor_command,
 )
 from hoyo_cli.errors import ConfigError, ErrorCode
@@ -131,35 +133,59 @@ class PreparedConfig:
     path: Path
     content: str
     original: bytes | None
-    conflict_hint: str = "Retry the account or config command."
+    conflict_hint: str = "Retry the profile or config command."
 
 
-def prepare_default_account(path: Path, name: str) -> PreparedConfig:
+def _upgrade(document: TOMLDocument) -> None:
+    """Relocate validated legacy data once, without touching credential stores."""
+    if document["version"] != 1:
+        return
+    document["version"] = 2
+    document["default_profile"] = deepcopy(document["default_account"])
+    del document["default_account"]
+    profiles = deepcopy(document["accounts"])
+    document["profiles"] = profiles
+    logins = _ensure_table(document, "logins")
+    for name, value in _ensure_table(document, "profiles").items():
+        profile = cast(MutableMapping[str, object], value)
+        login = _ensure_table(logins, name)
+        login["credential_backend"] = deepcopy(profile["credential_backend"])
+        login["credential_key"] = name
+        del profile["credential_backend"]
+        profile["login"] = name
+    del document["accounts"]
+
+
+def prepare_default_profile(path: Path, name: str) -> PreparedConfig:
     """Validate an exact existing name and prepare only the default field change."""
     _reject_symlink(path)
     document, original = _read_snapshot(path)
     config = _validate(document, path)
     try:
-        resolve_account(config, name)
+        resolve_profile(config, name)
     except ConfigError:
         raise ConfigError(
-            "Unknown account name; names must match exactly.",
-            hint="Run: hoyo account",
+            "Unknown profile name; names must match exactly.",
+            hint="Run: hoyo profile",
         ) from None
-    _set_field(document, "default_account", name)
+    # An already-selected default is a read-only no-op even for legacy data.
+    if name != config.default_profile:
+        _upgrade(document)
+        _set_field(document, "default_profile", name)
     content = tomlkit.dumps(document)
     _validate(tomlkit.parse(content), path)
     return PreparedConfig(
-        path, content, original, conflict_hint="Retry hoyo account use NAME."
+        path, content, original, conflict_hint="Retry hoyo profile use <name>."
     )
 
 
-def prepare_account(
+def prepare_profile(
     path: Path,
     name: str,
-    account: AccountConfig,
+    profile: ProfileConfig,
     *,
     make_default: bool,
+    login: LoginConfig | None = None,
     game_order: tuple[GameId, ...] | None = None,
     editor_command: tuple[str, ...] | None = None,
 ) -> PreparedConfig:
@@ -167,11 +193,12 @@ def prepare_account(
     if path.exists():
         document, original = _read_snapshot(path)
         _validate(document, path)
+        _upgrade(document)
     else:
         original = None
         document = tomlkit.document()
-        document["version"] = 1
-        document["default_account"] = name
+        document["version"] = 2
+        document["default_profile"] = name
         document["game_order"] = list(
             game_order if game_order is not None else GAME_IDS
         )
@@ -179,17 +206,20 @@ def prepare_account(
         _set_editor(document, editor_command)
 
     if make_default:
-        _set_field(document, "default_account", name)
+        _set_field(document, "default_profile", name)
     if game_order is not None:
         _set_field(document, "game_order", list(game_order))
-    accounts = _ensure_table(document, "accounts")
-    selected = _ensure_table(accounts, name)
-    _set_field(selected, "credential_backend", account.credential_backend)
+    if login is not None:
+        selected_login = _ensure_table(_ensure_table(document, "logins"), profile.login)
+        _set_field(selected_login, "credential_backend", login.credential_backend)
+        _set_field(selected_login, "credential_key", login.credential_key)
+    selected = _ensure_table(_ensure_table(document, "profiles"), name)
+    _set_field(selected, "login", profile.login)
     games = _ensure_table(selected, "games")
     for game in GAME_IDS:
-        if game not in account.games and game in games:
+        if game not in profile.games and game in games:
             del games[game]
-    for game, selection in account.games.items():
+    for game, selection in profile.games.items():
         fields = _ensure_table(games, game)
         _set_field(fields, "enabled", selection.enabled)
         _set_field(fields, "uid", selection.uid)
@@ -218,6 +248,7 @@ def prepare_editor(path: Path, command: tuple[str, ...] | None) -> PreparedConfi
     _reject_symlink(path)
     document, original = _read_snapshot(path)
     _validate(document, path)
+    _upgrade(document)
     _set_editor(document, command)
     content = tomlkit.dumps(document)
     _validate(tomlkit.parse(content), path)
@@ -231,6 +262,7 @@ def prepare_game_order(path: Path, order: tuple[GameId, ...]) -> PreparedConfig:
     _reject_symlink(path)
     document, original = _read_snapshot(path)
     _validate(document, path)
+    _upgrade(document)
     _set_field(document, "game_order", list(order))
     content = tomlkit.dumps(document)
     _validate(tomlkit.parse(content), path)
@@ -257,20 +289,22 @@ def commit_config(prepared: PreparedConfig) -> None:
     _atomic_write(prepared.path, prepared.content)
 
 
-def save_account(
+def save_profile(
     path: Path,
     name: str,
-    account: AccountConfig,
+    profile: ProfileConfig,
     *,
     make_default: bool,
     game_order: tuple[GameId, ...],
+    login: LoginConfig | None = None,
 ) -> None:
     commit_config(
-        prepare_account(
+        prepare_profile(
             path,
             name,
-            account,
+            profile,
             make_default=make_default,
             game_order=game_order,
+            login=login,
         )
     )

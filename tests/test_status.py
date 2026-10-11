@@ -68,7 +68,7 @@ async def test_all_three_fetch_concurrently(tmp_path: Path) -> None:
         fetch_all_status(
             gateway,
             {"zzz": 3, "genshin": 1, "hsr": 2},
-            account="main",
+            profile="main",
             cache_root=tmp_path,
             clock=lambda: NOW,
             observer=observations.append,
@@ -112,7 +112,7 @@ async def test_one_failure_keeps_other_two_sections(tmp_path: Path) -> None:
     results = await fetch_all_status(
         gateway,
         {"genshin": 1, "hsr": 2, "zzz": 3},
-        account="main",
+        profile="main",
         cache_root=tmp_path,
         clock=lambda: NOW,
     )
@@ -139,7 +139,7 @@ async def test_cancellation_propagates_and_cleans_children(tmp_path: Path) -> No
         fetch_all_status(
             gateway,
             {"genshin": 1, "hsr": 2},
-            account="main",
+            profile="main",
             cache_root=tmp_path,
             clock=lambda: NOW,
         )
@@ -159,7 +159,7 @@ async def test_wrong_game_does_not_suppress_independent_results(tmp_path: Path) 
     results = await fetch_all_status(
         gateway,
         {"genshin": 1, "hsr": 2},
-        account="main",
+        profile="main",
         cache_root=tmp_path,
         clock=lambda: NOW,
     )
@@ -171,13 +171,13 @@ async def test_wrong_game_does_not_suppress_independent_results(tmp_path: Path) 
 async def test_fresh_request_even_when_cache_exists(tmp_path: Path) -> None:
     data = snapshots()
     old = CacheEntry(
-        1, "main", "genshin", NOW - timedelta(hours=1), data["genshin"], uid=1
+        2, "main", "genshin", NOW - timedelta(hours=1), data["genshin"], uid=1
     )
     write_cache(tmp_path, old)
     gateway = AsyncMock()
     gateway.fetch_status.return_value = data["genshin"]
     results = await fetch_all_status(
-        gateway, {"genshin": 1}, account="main", cache_root=tmp_path, clock=lambda: NOW
+        gateway, {"genshin": 1}, profile="main", cache_root=tmp_path, clock=lambda: NOW
     )
     gateway.fetch_status.assert_awaited_once_with("genshin", 1)
     assert not results[0].stale and results[0].fetched_at == NOW
@@ -188,7 +188,7 @@ async def test_fresh_request_even_when_cache_exists(tmp_path: Path) -> None:
 @pytest.mark.asyncio
 async def test_partial_stale_fallback_per_game(tmp_path: Path) -> None:
     data = snapshots()
-    old = CacheEntry(1, "main", "hsr", NOW - timedelta(minutes=34), data["hsr"], uid=2)
+    old = CacheEntry(2, "main", "hsr", NOW - timedelta(minutes=34), data["hsr"], uid=2)
     write_cache(tmp_path, old)
     before = {p: p.read_bytes() for p in tmp_path.rglob("*.json")}
     error = NetworkError("HoYoLAB request timed out.")
@@ -203,7 +203,7 @@ async def test_partial_stale_fallback_per_game(tmp_path: Path) -> None:
     results = await fetch_all_status(
         gateway,
         {"genshin": 1, "hsr": 2, "zzz": 3},
-        account="main",
+        profile="main",
         cache_root=tmp_path,
         clock=lambda: NOW,
     )
@@ -219,13 +219,13 @@ async def test_partial_stale_fallback_per_game(tmp_path: Path) -> None:
 @pytest.mark.asyncio
 @pytest.mark.parametrize("case", ["corrupt", "expired", "future", "other-account"])
 async def test_ineligible_cache_does_not_mask_error(tmp_path: Path, case: str) -> None:
-    old = CacheEntry(1, "main", "hsr", NOW, snapshots()["hsr"], uid=2)
+    old = CacheEntry(2, "main", "hsr", NOW, snapshots()["hsr"], uid=2)
     if case == "expired":
         old = replace(old, fetched_at=NOW - timedelta(hours=3, seconds=1))
     elif case == "future":
         old = replace(old, fetched_at=NOW + timedelta(seconds=1))
     elif case == "other-account":
-        old = replace(old, account="alt")
+        old = replace(old, profile="alt")
     write_cache(tmp_path, old)
     if case == "corrupt":
         next(tmp_path.rglob("*.json")).write_text("{broken")
@@ -233,7 +233,7 @@ async def test_ineligible_cache_does_not_mask_error(tmp_path: Path, case: str) -
     gateway = AsyncMock()
     gateway.fetch_status.side_effect = error
     results = await fetch_all_status(
-        gateway, {"hsr": 2}, account="main", cache_root=tmp_path, clock=lambda: NOW
+        gateway, {"hsr": 2}, profile="main", cache_root=tmp_path, clock=lambda: NOW
     )
     assert results[0].status is None and results[0].error is error
 
@@ -257,7 +257,7 @@ async def test_cache_write_failure_preserves_fresh_and_other_writes(
     results = await fetch_all_status(
         gateway,
         {"genshin": 1, "hsr": 2},
-        account="main",
+        profile="main",
         cache_root=tmp_path,
         clock=lambda: NOW,
     )
@@ -297,7 +297,7 @@ async def test_success_writes_before_slow_game_finishes(
         fetch_all_status(
             gateway,
             {"genshin": 1, "hsr": 2},
-            account="main",
+            profile="main",
             cache_root=tmp_path,
             clock=lambda: NOW,
         ),
@@ -309,7 +309,7 @@ async def test_success_writes_before_slow_game_finishes(
 async def test_cancelled_request_does_not_use_or_replace_existing_cache(
     tmp_path: Path,
 ) -> None:
-    old = CacheEntry(1, "main", "genshin", NOW, snapshots()["genshin"], uid=1)
+    old = CacheEntry(2, "main", "genshin", NOW, snapshots()["genshin"], uid=1)
     write_cache(tmp_path, old)
     before = {p: p.read_bytes() for p in tmp_path.rglob("*.json")}
     gateway = AsyncMock()
@@ -318,7 +318,7 @@ async def test_cancelled_request_does_not_use_or_replace_existing_cache(
         await fetch_all_status(
             gateway,
             {"genshin": 1},
-            account="main",
+            profile="main",
             cache_root=tmp_path,
             clock=lambda: NOW,
         )
@@ -338,10 +338,10 @@ async def test_changed_uid_never_uses_another_character_snapshot(
     previous_status = replace(
         original_status, resin=replace(original_status.resin, current=12)
     )
-    previous = CacheEntry(1, "main", "genshin", NOW, previous_status, uid=1)
+    previous = CacheEntry(2, "main", "genshin", NOW, previous_status, uid=1)
     write_cache(tmp_path, previous)
-    write_cache(tmp_path, replace(previous, account="alt", uid=2))
-    write_cache(tmp_path, CacheEntry(1, "main", "hsr", NOW, data["hsr"], uid=2))
+    write_cache(tmp_path, replace(previous, profile="alt", uid=2))
+    write_cache(tmp_path, CacheEntry(2, "main", "hsr", NOW, data["hsr"], uid=2))
     before = {p: p.read_bytes() for p in tmp_path.rglob("*.json")}
     error = NetworkError("HoYoLAB request timed out.")
     gateway = AsyncMock()
@@ -350,26 +350,27 @@ async def test_changed_uid_never_uses_another_character_snapshot(
     else:
         gateway.fetch_status.side_effect = error
     results = await fetch_all_status(
-        gateway, {"genshin": 2}, account="main", cache_root=tmp_path, clock=lambda: NOW
+        gateway, {"genshin": 2}, profile="main", cache_root=tmp_path, clock=lambda: NOW
     )
     gateway.fetch_status.assert_awaited_once_with("genshin", 2)
     assert not results[0].stale
-    assert set(tmp_path.rglob("*.json")) == set(before)
     if fresh:
         assert results[0].status == original_status and results[0].error is None
         cached = read_eligible(tmp_path, "main", "genshin", uid=2, now=NOW)
         assert cached is not None and cached.status == original_status
-        assert read_eligible(tmp_path, "main", "genshin", uid=1, now=NOW) is None
-        assert len([p for p, data in before.items() if p.read_bytes() != data]) == 1
+        assert read_eligible(tmp_path, "main", "genshin", uid=1, now=NOW) == previous
+        assert len(set(tmp_path.rglob("*.json")) - set(before)) == 1
+        assert all(p.read_bytes() == data for p, data in before.items())
     else:
+        assert set(tmp_path.rglob("*.json")) == set(before)
         assert results[0].status is None and results[0].error is error
         assert read_eligible(tmp_path, "main", "genshin", uid=1, now=NOW) == previous
         assert all(p.read_bytes() == data for p, data in before.items())
     assert read_eligible(tmp_path, "alt", "genshin", uid=2, now=NOW) == replace(
-        previous, account="alt", uid=2
+        previous, profile="alt", uid=2
     )
     assert read_eligible(tmp_path, "main", "hsr", uid=2, now=NOW) == CacheEntry(
-        1, "main", "hsr", NOW, data["hsr"], uid=2
+        2, "main", "hsr", NOW, data["hsr"], uid=2
     )
 
 
@@ -386,7 +387,7 @@ async def test_mixed_results_evaluate_age_when_failure_finishes(
     tmp_path: Path, initial_age: timedelta, elapsed: timedelta, eligible: bool
 ) -> None:
     data = snapshots()
-    old = CacheEntry(1, "main", "hsr", NOW - initial_age, data["hsr"], uid=2)
+    old = CacheEntry(2, "main", "hsr", NOW - initial_age, data["hsr"], uid=2)
     write_cache(tmp_path, old)
     before = {p: p.read_bytes() for p in tmp_path.rglob("*.json")}
     current = NOW
@@ -403,7 +404,7 @@ async def test_mixed_results_evaluate_age_when_failure_finishes(
 
     gateway.fetch_status.side_effect = fetch
     results = await fetch_all_status(
-        gateway, UIDS, account="main", cache_root=tmp_path, clock=lambda: current
+        gateway, UIDS, profile="main", cache_root=tmp_path, clock=lambda: current
     )
     assert [r.game for r in results] == ["genshin", "hsr", "zzz"]
     assert results[1].stale == eligible and results[1].error is error
@@ -437,7 +438,7 @@ async def test_fresh_timestamp_is_captured_after_awaited_completion(
     (result,) = await fetch_all_status(
         gateway,
         {"genshin": 2},
-        account="main",
+        profile="main",
         cache_root=tmp_path,
         clock=lambda: current,
     )
@@ -452,14 +453,14 @@ async def test_progress_reports_stale_and_failed_without_error_details(
     tmp_path: Path,
 ) -> None:
     data = snapshots()
-    write_cache(tmp_path, CacheEntry(1, "main", "hsr", NOW, data["hsr"], uid=2))
+    write_cache(tmp_path, CacheEntry(2, "main", "hsr", NOW, data["hsr"], uid=2))
     gateway = AsyncMock()
     gateway.fetch_status.side_effect = RuntimeError("cookie-secret")
     events: list[ProgressEvent] = []
     results = await fetch_all_status(
         gateway,
         {"hsr": 2, "zzz": 3},
-        account="main",
+        profile="main",
         cache_root=tmp_path,
         clock=lambda: NOW,
         observer=events.append,
@@ -483,7 +484,7 @@ async def test_status_observer_failure_does_not_change_result(tmp_path: Path) ->
     (result,) = await fetch_all_status(
         gateway,
         {"genshin": 1},
-        account="main",
+        profile="main",
         cache_root=tmp_path,
         clock=lambda: NOW,
         observer=broken,
@@ -508,7 +509,7 @@ async def test_status_cancel_does_not_observe_a_resolved_game(tmp_path: Path) ->
         fetch_all_status(
             gateway,
             {"genshin": 1},
-            account="main",
+            profile="main",
             cache_root=tmp_path,
             clock=lambda: NOW,
             observer=events.append,

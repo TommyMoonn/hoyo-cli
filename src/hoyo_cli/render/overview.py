@@ -16,14 +16,14 @@ from hoyo_cli.timefmt import format_duration, format_local_timestamp
 def render_overview(
     results: Sequence[StatusResult],
     *,
-    account: str,
+    profile: str,
     detailed: bool,
     now: datetime,
     focused: bool = False,
 ) -> RenderableType:
     require_aware(now)
     parts: list[RenderableType] = [
-        Text(f"HoYo Daily · {account}", style=STYLES["heading"]),
+        Text(f"HoYo Daily · {profile}", style=STYLES["heading"]),
         Text(""),
     ]
     for result in results:

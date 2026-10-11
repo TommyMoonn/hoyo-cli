@@ -15,14 +15,14 @@ import genshin
 import keyring
 import pytest
 from click.testing import CliRunner
+from profile_fixtures import ProfileSeed, save_profile
 from rich.console import Console
 
 from hoyo_cli.auth.credentials import Credentials, parse_cookie_header
 from hoyo_cli.auth.keyring_backend import KeyringStore
 from hoyo_cli.auth.plaintext_backend import PlaintextStore
 from hoyo_cli.commands import check_in, init, status
-from hoyo_cli.config.models import AccountConfig, CredentialBackend, GameSelection
-from hoyo_cli.config.repository import save_account
+from hoyo_cli.config.models import CredentialBackend, GameSelection
 from hoyo_cli.hoyolab.client import GatewayClient, GenshinPyGateway
 from hoyo_cli.hoyolab.discovery import CharacterRef
 from hoyo_cli.models.common import GAME_IDS, GameId
@@ -111,11 +111,11 @@ def acceptance_env(
     env.keyring.delete_password.side_effect = delete_password
     for method in ("get_password", "set_password", "delete_password"):
         monkeypatch.setattr(keyring, method, getattr(env.keyring, method))
-    account = AccountConfig(
+    account = ProfileSeed(
         backend, {game: GameSelection(True, uid) for game, uid in TEST_UIDS.items()}
     )
     for name in ("main", "alt"):
-        save_account(
+        save_profile(
             env.config, name, account, make_default=name == "main", game_order=GAME_IDS
         )
         store = (

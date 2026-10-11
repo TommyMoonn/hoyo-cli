@@ -37,11 +37,11 @@ class SetupPresenter:
     def message(self, message: str) -> None:
         self.console.print(Text(message))
 
-    def step(self, number: int, label: str, account: str | None = None) -> None:
+    def step(self, number: int, label: str, profile: str | None = None) -> None:
         self.console.print()
         self.message(f"Step {number}/4 · {label}")
-        if account is not None:
-            self.message(f"Account: {account}")
+        if profile is not None:
+            self.message(f"Profile: {profile}")
 
     def game(self, game: GameId) -> None:
         self.console.print()
@@ -54,7 +54,8 @@ class SetupPresenter:
         games: Mapping[GameId, GameSelection],
         characters: Mapping[GameId, CharacterRef],
         backend: CredentialBackend,
-        default_account: str,
+        login: str,
+        default_profile: str,
         order: tuple[GameId, ...],
         staged: bool = True,
         editor: str | None = None,
@@ -63,7 +64,7 @@ class SetupPresenter:
             self.step(4, "Review", name)
         else:
             self.console.print()
-            self.message(f"Review changes · Account: {name}")
+            self.message(f"Review changes · Profile: {name}")
         for game in GAME_IDS:
             selection = games.get(game)
             if selection is None:
@@ -73,13 +74,14 @@ class SetupPresenter:
             identity = (
                 character_choice(character)
                 if character is not None
-                else f"UID {selection.uid} (retained selection)"
+                else f"UID {selection.uid} (retained selection, unverified)"
             )
             state = "Enabled" if selection.enabled else "Disabled"
             self.message(f"{GAME_NAMES[game]}: {state}")
             self.message(f"  {identity}")
+        self.message(f"Login: {login}")
         self.message(f"Credential storage: {backend}")
-        self.message(f"Default account: {default_account}")
+        self.message(f"Default profile: {default_profile}")
         self.message("Game order: " + ", ".join(order))
         if editor is not None:
             self.message("Editor: " + editor)
