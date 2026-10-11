@@ -45,10 +45,6 @@ For Chrome or Edge:
 5. Find ltoken_v2 and copy its Value into the second setup prompt.
 6. Press enter to continue with the setup.
 
-> [!IMPORTANT]
-> Treat the cookie string like a password, losing it can be dangerous so never share it with anyone.
-> The setup prompt hides the input, so your paste is still working even if no text apprears.
-
 ## Import from a browser
 
 Browser import may not work on every machine.
