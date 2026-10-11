@@ -78,3 +78,7 @@ For more detail see [profiles guide](docs/profiles.md).
 - [Configuration](docs/configuration.md): settings, file locations, and editor preferences.
 - [Troubleshooting](docs/troubleshooting.md): common setup and status problems.
 - [Development](docs/development.md): local checks and opt-in live tests.
+
+## License
+
+Hoyo CLI is licensed under the [MIT License](LICENSE).
