@@ -1,102 +1,80 @@
-# Account setup
+# First-time setup
 
-Install HoYo CLI using the [README](../README.md#installation), then run:
+After you finish [installing HoYo CLI](../README.md#install) run this to start the setup process:
 
-```powershell
+```bash
 hoyo init
 ```
 
-You need a HoYoLAB account linked to a supported game and internet access.
-Setup uses your HoYoLAB session cookies to access that account.
-
 ## First account
 
-1. Enter an account name, such as `main`.
-2. Import a browser session or paste cookies manually.
-3. Choose a linked character for each discovered game and decide which games to enable.
-4. Choose the game display order.
-5. Choose credential storage. Prefer `keyring`, which uses your OS credential store.
-6. Confirm saving, then run `hoyo` to view status.
+1. **Name your profile:** Like `main`, or anything you want. This is a local profile name, not related to your HoYoLAB username.
+2. **Connect to HoYoLAB:** Enter your `ltuid_v2` and `ltoken_v2` cookie values, or try importing them from a browser. Manual cookie input is recommended.
+3. **Choose characters:** Choose the character region you want to track for each game.
+4. **Set game order:** Keep the default order or choose which game appears first in the overview.
+5. **Choose credential storage.** Use the OS keyring if possible. Plaintext storage is not recommended, but is still an option.
 
-Enable at least one game. Setup saves only after your final confirmation.
+When setup finishes, you can run and check if it works:
 
-## Import from a browser
+```bash
+hoyo
+```
 
-Sign in to [HoYoLAB](https://www.hoyolab.com/) in your browser before running
-setup. Agree to browser import, then select a session from the numbered list.
+## Enter cookie values manually
 
-HoYo CLI has loaders for Chrome, Edge, Firefox, Chromium, Opera, and Brave.
-Availability depends on whether the cookie library can access that browser on
-your system. If import fails or no usable session is found, use manual input.
+For Chrome or Edge:
+
+1. Open [HoYoLAB](https://www.hoyolab.com/) and sign in.
+2. Press `F12` to open Developer Tools, then select **Application**.
+3. Under **Storage**, expand **Cookies** and select `https://www.hoyolab.com`.
+4. Find the row named `ltuid_v2`. Copy the contents of its **Value** column into the `ltuid_v2` setup prompt.
+5. Do the same for `ltoken_v2` in the second prompt.
+6. After that is finished, HoYo CLI checks the session and looks for your linked characters.
+
+> [!IMPORTANT]
+> Treat these values like passwords. Do not share them or put them in screenshots or issue reports.
+>
+> Both setup prompts hide what you type or paste, so its still working even if no text apprears.
 
 ## Copy cookies manually
 
-Treat the complete cookie string like a password. Paste it only into the hidden
-setup prompt, never into a command, issue, screenshot, or shared file.
+1. Open [HoYoLAB](https://www.hoyolab.com/).
+2. Press F12 and select the Application tab.
+3. Under Storage, expand Cookies and select `https://www.hoyolab.com`.
+4. Find ltuid_v2 and copy its Value into the first setup prompt.
+5. Find ltoken_v2 and copy its Value into the second setup prompt.
+6. Press enter to continue with the setup.
 
-To obtain a full Cookie header:
+> [!IMPORTANT]
+> Treat the cookie string like a password, losing it can be dangerous so never share it with anyone.
+> The setup prompt hides the input, so your paste is still working even if no text apprears.
+
+## Import from a browser
+
+Browser import may not work on every machine.
 
 1. Sign in to HoYoLAB in your browser.
-2. Open Developer Tools and select the Network tab.
-3. Reload the page and inspect a request to a HoYoLAB domain.
-4. In its request headers, find a `Cookie` value containing the authentication
-   fields listed below. Another HoYoLAB request may be needed if they are absent.
-5. Copy the header value as one line, without the `Cookie:` label.
-6. Decline browser import or choose manual input, then paste the value at
-   `Full HoYoLAB Cookie header (hidden)`.
+2. In `hoyo init`, choose **Import from browser**.
+3. Choose a browser source and, where available, a browser profile.
+4. Let HoYo CLI try to read and verify the session.
 
-The input uses semicolon-separated `name=value` pairs. HoYo CLI requires
-`ltuid` and `ltoken`, or `ltuid_v2` and `ltoken_v2`; matching account-ID aliases
-are also accepted. It keeps recognized authentication fields and rejects missing,
-duplicate, or conflicting values without printing them.
+Browser import supports common Chromium browsers and Firefox. Browser encryption or an open browser can prevent access to the cookies. If import fails, return to manual entry.
 
-The [upstream authentication guide](https://seria.is-a.dev/genshin.py/authentication/#from-the-browser)
-also explains where to locate HoYoLAB cookies in browser storage.
+## Where does your crendentials go?
 
-## Credential storage
-
-| Choice | Storage |
+| Choice | Where it is stored |
 | --- | --- |
-| `keyring` | OS credential store, under service `hoyo-cli` and your exact account name |
-| `plaintext` | `~/.hoyo/credentials.toml`, separate from normal configuration |
+| `keyring` | Your operating system's credential store (recommended) |
+| `plaintext` | `~/.hoyo/credentials.toml` |
 
-Plaintext storage requires explicit consent. On POSIX systems the file is written
-with mode `0600`. On Windows it inherits directory permissions, so keep the
-directory private. Do not include credentials in Git commits or shared archives.
+Plaintext storage leaves authentication values in a local file. That is why I highly recommend using keyring, since its way more secure. Plaintext is still available as an option if for some reason keyring does not work, but be very careful not to share or leak it elsewhere.
 
-## Add or update accounts
+Once connected, you don't have to enter cookies for every `hoyo` command. If the session later stops working, update it through `hoyo profile edit <name>`.
 
-Run `hoyo init` again and choose an existing account or **Create new account**.
-An account name selects one character per game; use separate named accounts for
-different characters or regions of the same game.
+All of these settings can be changed directly in `configuration.toml`. See [configuration guide](configuration.md) for more details.
 
-After creating an account named `alt`, select it with:
+## Next steps
 
-```powershell
-hoyo --account alt
-```
-
-Names are case-sensitive and must match exactly. With an existing configuration,
-`hoyo init --account alt` selects an existing account; create new accounts through
-the setup menu.
-
-Updating an account requires a fresh imported or pasted session and consent to
-replace credentials. Games not found in that session are disabled, with their
-previous UIDs retained. Setup preserves other accounts and unrelated settings.
-
-Changing credential storage does not migrate or remove old secrets. Remove unused
-entries from the old backend yourself.
-
-## Troubleshooting
-
-- **Session rejected or expired:** sign in to HoYoLAB again, then rerun `hoyo init`.
-- **No linked characters:** check that the chosen HoYoLAB session belongs to the
-  account with your supported game characters.
-- **Status access rejected:** check your account's HoYoLAB notes and privacy
-  settings. HoYo CLI does not enable notes access automatically.
-- **OS keyring unavailable:** use a working OS credential backend or explicitly
-  accept plaintext storage during setup.
-- **Malformed stored data:** repair the reported config or credential file, or
-  the `hoyo-cli` keyring entry, before retrying setup.
-
-See [configuration](configuration.md) for file locations and manual editing.
+- [Check your games or claim daily rewards](commands.md).
+- [Add another profile or change characters](profiles.md).
+- [Fix an authentication or browser import problem](troubleshooting.md).

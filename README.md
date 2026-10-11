@@ -1,28 +1,20 @@
-# HoYo CLI
+# About HoYo CLI
 
-Check your daily and weekly HoYo game progress from the terminal, without opening
-each game or navigating HoYoLAB.
+I got too lazy to open each game (or use HoYoLAB) just to check my daily, weekly stats. So I made a small terminal app that puts all the information I need in one place.
 
-HoYo CLI supports **Genshin Impact**, **Honkai: Star Rail**, and
-**Zenless Zone Zero** using your HoYoLAB account.
+HoYo CLI currently supports **Genshin Impact**, **Honkai: Star Rail**, and **Zenless Zone Zero**. It uses your HoYoLAB login to read linked data from those games you play.
+
+## Vibes
+
+This app is written entirely by AI. I have not read a single line of code in this.
+
+I'm not planning to add any more features than just for checking daily and weekly information. No current plans for maintaning this app, but any feedback you have are still greatly appreciated.
 
 ## Features
 
-- See stamina, daily tasks, expeditions or assignments, and weekly activities in
-  one overview.
-- Focus on one game or show more detail, including available recovery times and
-  reset information.
-- Switch between multiple named accounts and choose which games to display.
-- Claim HoYoLAB daily check-in rewards with an explicit command.
-- Get readable output that adapts to your terminal width, with optional color.
-- Keep seeing successful games when another fails. Recent cached results can
-  appear as a clearly marked fallback.
-
-| Game | Examples of tracked status |
-| --- | --- |
-| Genshin Impact | Resin, Realm Currency, commissions, expeditions, Transformer |
-| Honkai: Star Rail | Trailblaze Power, Daily Training, assignments, weekly activities |
-| Zenless Zone Zero | Battery Charge, Engagement, Scratch Card, Video Store, Hollow Zero |
+- See stamina, daily tasks, expeditions or assignments, and weekly activities.
+- Has support for multiple accounts through profiles.
+- Claim HoYoLAB daily check-in rewards.
 
 Some fields depend on what HoYoLAB makes available for your account.
 
@@ -31,52 +23,58 @@ Some fields depend on what HoYoLAB makes available for your account.
 - Python 3.11 or newer.
 - [uv](https://docs.astral.sh/uv/getting-started/installation/) for installation.
 - A HoYoLAB account linked to at least one supported game.
-- Internet access for account setup, fresh status, and check-in.
-
-Runtime dependencies are installed automatically.
 
 ## Installation
 
-Download or clone this repository, then open a terminal in the project directory:
+Open terminal and clone this repository.
 
-```powershell
+```bash
+git clone https://github.com/TommyMoonn/hoyo-cli.git
+cd hoyo-cli
 uv tool install .
-hoyo --help
 ```
 
-If uv reports that its tool directory is missing from `PATH`, follow its
-instructions and open a new terminal.
+After installing, you can run `hoyo --help` to test it.
 
 ## Getting started
 
-Set up your account, then view your enabled games:
+Set up your first profile, then from there you can check your games:
 
-```powershell
+```bash
 hoyo init
 hoyo
 ```
 
-Setup can import an existing browser session or accept manually copied cookies.
-It lets you select your game characters and credential storage. See the
-[account setup guide](docs/setup.md) for instructions.
+Setup can import an existing browser session or you can provide the cookies yourself. See the [setup guide](docs/setup.md) for a detailed walk through of the process.
 
-For a closer look at one game:
+## Everyday commands
 
-```powershell
-hoyo genshin --detailed
+```bash
+hoyo                        # Check all enabled games
+hoyo genshin                # One game
+hoyo hsr --detailed         # More supported details
+hoyo check-in               # Daily rewards for enabled games
 ```
 
-Status requests fresh data each time. If a request fails, a matching cached
-snapshot up to three hours old may be shown as `STALE`; resource amounts are
-not estimated forward. Viewing status never claims rewards. Use `hoyo check-in`
-when you want to claim them.
+Treat your HoYoLAB cookies like a password. Never share credential files.
 
-Treat HoYoLAB cookies like a password. Prefer the OS credential store; plaintext
-storage is optional and requires your consent. Never share credential files.
+## Profiles
+
+For another character or server, you can add a profile then choose when to use it:
+
+```bash
+hoyo profile add america
+hoyo --profile america      # Effective for that command, does not change the default profile
+hoyo profile use america    # Changes the default profile, all commands after this uses this profile.
+```
+
+For more detail see [profiles guide](docs/profiles.md).
 
 ## Documentation
 
-- [Account setup](docs/setup.md): browser import, manual cookies, and multiple accounts.
-- [Command reference](docs/commands.md): commands, options, check-in, and uninstalling.
-- [Configuration](docs/configuration.md): settings, file locations, and editor setup.
-- [Development](docs/development.md): local environment, checks, and optional live tests.
+- [First-time setup](docs/setup.md): authentication, character selection, and storage.
+- [Profiles](docs/profiles.md): add, edit, switch, and share a saved HoYoLAB login.
+- [Commands](docs/commands.md): command syntax and check-in results.
+- [Configuration](docs/configuration.md): settings, file locations, and editor preferences.
+- [Troubleshooting](docs/troubleshooting.md): common setup and status problems.
+- [Development](docs/development.md): local checks and opt-in live tests.

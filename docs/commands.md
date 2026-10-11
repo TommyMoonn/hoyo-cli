@@ -1,92 +1,60 @@
 # Command reference
 
-Run `hoyo --help` or `hoyo <command> --help` for built-in help.
-Game identifiers are `genshin`, `hsr`, and `zzz`.
+Use `genshin`, `hsr`, or `zzz` for the three supported games. Run `hoyo --help` for the commands, or `hoyo <command> --help` for a command's options/flags.
 
-## Commands
+## Check game statuses
 
-| Command | Purpose |
+| Command | What it shows |
 | --- | --- |
-| `hoyo` or `hoyo status` | Show an overview of all enabled games |
-| `hoyo status <game>` | Show one game's focused view |
-| `hoyo genshin`, `hoyo hsr`, `hoyo zzz` | Shortcuts for the focused views |
-| `hoyo check-in [game]` | Claim daily HoYoLAB rewards for enabled games or one game |
-| `hoyo init` | Set up or reconfigure an account |
-| `hoyo config` | Inspect configuration without reading stored credentials |
-| `hoyo config --edit` | Open valid configuration in your selected editor |
-| `hoyo --version` | Show the installed version |
+| `hoyo` | Overview of all enabled games on the default profile. |
+| `hoyo genshin` | Focused Genshin Impact status. |
+| `hoyo hsr` | Focused Honkai: Star Rail status. |
+| `hoyo zzz` | Focused Zenless Zone Zero status. |
+
+Some options/flags you can use with:
+
+- `--detailed` shows additional supported status fields.
+- `--no-color` disables terminal styling.
+- `--profile <name>` uses that profile for this command only.
+
+Examples:
+
+```bash
+hoyo --detailed
+hoyo hsr --detailed
+hoyo status zzz --no-color
+hoyo genshin --profile america
+```
 
 ## Options
 
 | Option | Purpose |
 | --- | --- |
-| `--account NAME` | Select an exact, case-sensitive account name |
+| `--account <name>` | Run the command for this account/profile |
 | `--detailed` | Show more supported fields in a status view |
 | `--no-color` | Disable terminal styling |
 
-`--account` and `--no-color` work before or after a command. `--detailed` works
-at the root, on `status`, and on game shortcuts. A command-level account overrides
-a root-level account; boolean options stay enabled if set in either position.
-
-```powershell
+```bash
 hoyo genshin --detailed
 hoyo --account alt
 hoyo status zzz --account alt --no-color
 ```
 
-Create `alt` through [account setup](setup.md) before selecting it. Explicitly
-requesting a disabled or unconfigured game produces an error.
-
-## Status and cached results
-
-Every status command requests fresh data. A failed game may show a cached snapshot
-for the same account and selected UID if it is no more than three hours old.
-The section includes the request error and `STALE` with the snapshot's age.
-Resource amounts remain as captured, without estimates of regeneration.
-
-Other games can still show fresh results. Expired, corrupt, or incompatible cache
-is ignored. A cache-save warning does not prevent fresh status from being shown.
-`Locked` and `Unavailable` describe individual systems, not necessarily a failed
-game request. Optional details appear only when supported data is available.
-
 ## Daily check-in
 
-```powershell
-hoyo check-in
+```bash
+hoyo check-in                     # All enabled games
+hoyo check-in genshin             # One game
+hoyo check-in --profile america   # Check in all enabled games for another profile
 ```
-
-This claims daily HoYoLAB rewards for every enabled game on the selected account.
-To request one game:
-
-```powershell
-hoyo check-in genshin
-hoyo check-in hsr
-hoyo check-in zzz
-```
-
-The command takes action immediately, with no additional confirmation. It checks
-today's claim state with a network request for each game, then skips the claim
-if already checked in. A failure does not hide the other results.
 
 | Result | Meaning |
 | --- | --- |
-| `Claimed` | HoYoLAB confirmed the claim response |
-| `Already checked in` | Today's reward was already claimed; no further claim is sent |
-| `Claimed (verified)` | The claim response was uncertain, but a fresh state check confirmed check-in |
-| `Unconfirmed` | The claim may have completed, but the fresh state check could not confirm it |
-| `Failed` | A state check or known claim rejection prevented completion |
-
-If a claim times out, loses its connection, or returns an unreadable response,
-the command makes one fresh read-only state query using the usual bounded read
-retry policy. A positive state confirms completion. A negative or failed query
-leaves the outcome `Unconfirmed`, since it cannot prove the claim did not complete.
-Check today's state on HoYoLAB before trying again. Claims are not automatically
-retried, and no background polling runs.
-If HoYoLAB requires verification, complete check-in on its website.
-
-Daily rewards apply to the authenticated HoYoLAB account and game rather than
-the selected character UID.
-Check-in does not fetch the status dashboard or use its cache.
+| `Claimed` | HoYoLAB confirmed the claim. |
+| `Already checked in` | Today's reward was already claimed; no claim was sent. |
+| `Claimed (verified)` | The claim result was unclear, but a later check confirmed it. |
+| `Unconfirmed` | The claim may have worked, but a later check couldn't confirm it. |
+| `Failed` | The state check or claim failed. |
 
 ## Exit codes
 
@@ -97,15 +65,36 @@ Check-in does not fetch the status dashboard or use its cache.
 | `2` | Invalid usage or configuration |
 | `3` | Missing, invalid, or inaccessible credentials before game requests start |
 
-Failures during individual game requests are included in the aggregate status or
-check-in result, including authentication failures.
+## Profiles
+
+| Command | Purpose |
+| --- | --- |
+| `hoyo init` | Set up the first profile. |
+| `hoyo profile` | List saved profiles and the current default. |
+| `hoyo profile add [name]` | Add a profile. The name is optional, setup asks if you omit it. |
+| `hoyo profile edit <name>` | Edit a profile's characters, linked login, session, or storage. |
+| `hoyo profile use <name>` | Set the default profile for future commands. |
+
+See [Profiles](profiles.md) for when to reuse a login.
+
+## Configuration
+
+| Command | Purpose |
+| --- | --- |
+| `hoyo config` | Show non-secret configuration, including disabled and unconfigured games. |
+| `hoyo config order` | Choose and save the global game display order. |
+| `hoyo config editor` | Set or clear the preferred editor. |
+| `hoyo config --edit` | Open `config.toml` with the configured editor. |
+| `hoyo --version` | Show installed version. |
+
+`--no-color` is available on normal status and check-in commands, and on supported setup/configuration commands.
+
+In syntax examples, `<name>` and `<game>` mean required values. `[name]` and `[game]` are optional. Enter the actual value without brackets.
 
 ## Uninstall
 
-```powershell
+```bash
 uv tool uninstall hoyo-cli
 ```
 
-User configuration, stored credentials, and status cache are separate from the
-installed tool. Remove them separately if you no longer need them; see
-[configuration](configuration.md#file-locations).
+Uninstalling the executable does not clear your saved configuration, credential backend, or cache. See [file locations](configuration.md#file-locations) if you want to clean up those separately.
