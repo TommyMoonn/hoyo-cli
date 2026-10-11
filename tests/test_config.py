@@ -15,7 +15,7 @@ from profile_fixtures import ProfileSeed, save_profile
 from tomlkit.toml_document import TOMLDocument
 
 from hoyo_cli.cli import main
-from hoyo_cli.commands.config import edit_config, show_config
+from hoyo_cli.commands.config import edit_config
 from hoyo_cli.config import repository
 from hoyo_cli.config.editor import ResolvedEditor, parse_editor_arguments
 from hoyo_cli.config.models import (
@@ -33,6 +33,7 @@ from hoyo_cli.config.repository import (
 )
 from hoyo_cli.errors import ConfigError
 from hoyo_cli.models.common import GameId
+from hoyo_cli.render.management import ManagementPresenter
 
 
 def _fake_executable(name: str) -> str:
@@ -459,7 +460,11 @@ def test_config_shows_paths_names_and_uids_not_secrets(
 ) -> None:
     config_document["profiles"]["main"]["ltoken"] = "private-marker"
     config_document["display"]["secret"] = "private-marker"
-    output = show_config(parse_config(config_document), tmp_path / "config.toml")
+    presenter = ManagementPresenter(no_color=True)
+    presenter.console.width = 200
+    with presenter.console.capture() as captured:
+        presenter.config(parse_config(config_document), tmp_path / "config.toml")
+    output = captured.get()
     for expected in (
         str(tmp_path / "config.toml"),
         "main",
@@ -474,8 +479,8 @@ def test_config_shows_paths_names_and_uids_not_secrets(
         assert expected in output
     assert "private-marker" not in output
     assert "ltoken" not in output
-    assert "zzz: disabled, UID 333333333" in output
-    assert "genshin: not configured" in output
+    assert "zzz: Disabled, UID 333333333" in output
+    assert "genshin: Not configured" in output
     assert "hoyo config order" in output and "hoyo profile edit <name>" in output
 
 
@@ -498,16 +503,16 @@ def test_config_inspection_preserves_long_names_and_disabled_selections_without_
         patch("hoyo_cli.auth.keyring_backend.KeyringStore.get") as keyring_get,
         patch("hoyo_cli.auth.plaintext_backend.PlaintextStore.get") as plaintext_get,
     ):
-        result = runner.invoke(main, ["config", "--no-color"], terminal_width=width)
+        result = runner.invoke(
+            main, ["config", "--no-color"], env={"COLUMNS": str(width)}
+        )
     assert result.exit_code == 0, result.output
-    assert f"Default profile: {name}" in result.output
-    assert f"Profile: {name}" in result.output
-    assert "zzz: disabled, UID 333333333" in result.output
-    assert "hsr: not configured" in result.output
-    assert (
-        "hoyo config order" in result.output
-        and "hoyo profile edit <name>" in result.output
-    )
+    output = " ".join(result.output.split())
+    assert f"Default profile: {name}" in output
+    assert f"Profile: {name}" in output
+    assert "zzz: Disabled, UID 333333333" in output
+    assert "hsr: Not configured" in output
+    assert "hoyo config order" in output and "hoyo profile edit <name>" in output
     assert "private-marker" not in result.output and "\x1b" not in result.output
     store.assert_not_called()
     keyring_get.assert_not_called()
@@ -612,7 +617,7 @@ def test_invalid_config_exits_2_without_traceback(
     with patch("hoyo_cli.commands.config.config_path", return_value=path):
         result = runner.invoke(main, ["config"])
     assert result.exit_code == 2
-    assert str(path) in result.output
+    assert "".join(str(path).split()) in "".join(result.output.split())
     assert "private-marker" not in result.output
     assert "Traceback" not in result.output
     assert path.read_bytes() == original
@@ -654,7 +659,7 @@ def test_config_cli_no_editor_is_actionable(
     with patch("hoyo_cli.commands.config.config_path", return_value=path):
         result = runner.invoke(main, ["config", "--edit"])
     assert result.exit_code == 2
-    assert str(path) in result.output
+    assert "".join(str(path).split()) in "".join(result.output.split())
     assert "VISUAL" in result.output
     assert "Traceback" not in result.output
 
@@ -747,7 +752,10 @@ def test_inspection_handles_accounts_with_no_enabled_games(
 ) -> None:
     for game in ("genshin", "hsr", "zzz"):
         config_document["profiles"]["main"]["games"][game]["enabled"] = False
-    output = show_config(parse_config(config_document), tmp_path / "config.toml")
+    presenter = ManagementPresenter(no_color=True)
+    with presenter.console.capture() as captured:
+        presenter.config(parse_config(config_document), tmp_path / "config.toml")
+    output = captured.get()
     assert "Profile: main" in output
     assert "No enabled games" in output
 
@@ -823,7 +831,7 @@ def test_editor_nonzero_exit_is_a_clean_command_failure(
         result = runner.invoke(main, ["config", "--edit"])
     assert result.exit_code == 1
     assert "status 9" in result.output
-    assert str(path) in result.output
+    assert "".join(str(path).split()) in "".join(result.output.split())
     assert "Traceback" not in result.output
 
 

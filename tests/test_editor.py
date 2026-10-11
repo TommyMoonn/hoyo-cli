@@ -17,7 +17,7 @@ from test_init import FakeBrowser, FakeDiscovery, FakeIO
 from tomlkit.toml_document import TOMLDocument
 
 from hoyo_cli.cli import main
-from hoyo_cli.commands.config import edit_config, run_editor, show_config
+from hoyo_cli.commands.config import edit_config, run_editor
 from hoyo_cli.commands.init import run_init, select_editor
 from hoyo_cli.config.editor import (
     detected_editors,
@@ -28,6 +28,7 @@ from hoyo_cli.config.editor import (
 from hoyo_cli.config.models import parse_config
 from hoyo_cli.config.repository import commit_config, load_config, prepare_editor
 from hoyo_cli.errors import ConfigError
+from hoyo_cli.render.management import ManagementPresenter
 from hoyo_cli.render.setup import SetupPresenter
 
 
@@ -449,7 +450,8 @@ def test_nonblocking_editor_does_not_claim_completed_validation(
     ):
         result = runner.invoke(main, ["config", "--edit"])
     assert result.exit_code == 0, result.output
-    assert "unconfirmed" in result.output and "run hoyo config" in result.output
+    output = " ".join(result.output.split())
+    assert "unconfirmed" in output and "run hoyo config" in output
     assert "validated" not in result.output
     assert read.call_count == 1
 
@@ -459,7 +461,10 @@ def test_inspection_marks_unavailable_saved_executable(
 ) -> None:
     config_document["editor"] = {"command": ["missing-editor"]}
     with patch("shutil.which", return_value=None):
-        result = show_config(parse_config(config_document), Path("config.toml"))
+        presenter = ManagementPresenter(no_color=True)
+        with presenter.console.capture() as captured:
+            presenter.config(parse_config(config_document), Path("config.toml"))
+        result = captured.get()
     assert "missing-editor" in result and "Editor executable: unavailable" in result
 
 
@@ -506,7 +511,8 @@ def test_edit_failures_are_actionable_and_preserve_user_edits(
     ):
         result = runner.invoke(main, ["config", "--edit"])
     assert result.exit_code == (1 if failure == "exit" else 2), result.output
-    assert "hoyo config" in result.output and str(path) in result.output
+    assert "hoyo config" in " ".join(result.output.split())
+    assert "".join(str(path).split()) in "".join(result.output.split())
     assert (
         "private-diagnostic" not in result.output and "Traceback" not in result.output
     )

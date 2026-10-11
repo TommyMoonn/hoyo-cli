@@ -1,5 +1,6 @@
 """Width-aware, non-secret setup presentation, independent of prompts and writes."""
 
+import os
 import shutil
 import sys
 from collections.abc import Mapping, Sequence
@@ -8,9 +9,11 @@ from rich.padding import Padding
 from rich.text import Text
 
 from hoyo_cli.config.models import CredentialBackend, GameSelection
+from hoyo_cli.errors import AppError
 from hoyo_cli.hoyolab.discovery import CharacterRef
 from hoyo_cli.models.common import GAME_IDS, GameId
 from hoyo_cli.render.console import make_console
+from hoyo_cli.render.errors import format_error
 
 GAME_NAMES: Mapping[GameId, str] = {
     "genshin": "GENSHIN IMPACT",
@@ -29,6 +32,7 @@ class SetupPresenter:
     def __init__(
         self, *, no_color: bool = False, configured_color: str = "auto"
     ) -> None:
+        no_color = no_color or bool(os.environ.get("CI"))
         self.console = make_console(
             width=None,
             no_color=no_color,
@@ -63,6 +67,19 @@ class SetupPresenter:
 
     def success(self, message: str) -> None:
         self.console.print(Text(message, style="success"))
+
+    def detail(self, label: str, value: str, *, indent: int = 0) -> None:
+        row = Text()
+        row.append(f"{label}: ", style="heading")
+        row.append(value, style="text")
+        self.console.print(Padding(row, (0, 0, 0, indent), expand=False))
+
+    def error(self, error: AppError) -> None:
+        # Keep the shared formatter authoritative, including multiline summaries.
+        summary, _, recovery = format_error(error).partition("\n")
+        self.error_console.print(Text(summary, style="error"))
+        if recovery:
+            self.error_console.print(Text(recovery, style="muted"))
 
     def choices(self, choices: Sequence[str], *, default: int = 1) -> None:
         for index, choice in enumerate(choices, 1):

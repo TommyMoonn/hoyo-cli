@@ -6,9 +6,11 @@ from typing import TypeVar
 import click
 
 from hoyo_cli.commands import CommandOptions, check_in, config, init, profile, status
+from hoyo_cli.config.paths import config_path
+from hoyo_cli.config.repository import load_config
 from hoyo_cli.errors import AppError
 from hoyo_cli.models.common import GAME_IDS, GameId
-from hoyo_cli.render.errors import format_error
+from hoyo_cli.render.setup import SetupPresenter
 
 _Callback = TypeVar("_Callback", bound=Callable[..., object])
 
@@ -18,7 +20,7 @@ class _ApplicationGroup(click.Group):
         try:
             return super().invoke(ctx)
         except AppError as error:
-            click.echo(format_error(error), err=True, color=False)
+            self._show_error(ctx, error)
             ctx.exit(error.exit_code)
         except (click.ClickException, click.Abort, click.exceptions.Exit):
             raise
@@ -30,8 +32,21 @@ class _ApplicationGroup(click.Group):
                     "state on HoYoLAB before trying again."
                 ),
             )
-            click.echo(format_error(error), err=True, color=False)
+            self._show_error(ctx, error)
             ctx.exit(error.exit_code)
+
+    @staticmethod
+    def _show_error(ctx: click.Context, error: AppError) -> None:
+        # The failing child context has unwound. Option resolution records its
+        # no-color override on the root, including intermediate group flags.
+        no_color = bool(ctx.params.get("no_color")) or bool(ctx.meta.get("no_color"))
+        try:
+            configured_color = load_config(config_path()).display_color
+        except (AppError, OSError):
+            configured_color = "auto"
+        SetupPresenter(no_color=no_color, configured_color=configured_color).error(
+            error
+        )
 
 
 def _common_options(
@@ -70,10 +85,12 @@ def _resolve_options(
     while parent is not None:
         no_color = no_color or bool(parent.params.get("no_color", False))
         parent = parent.parent
+    no_color = root.no_color or no_color
+    ctx.find_root().meta["no_color"] = no_color
     return CommandOptions(
         profile=profile if profile is not None else root.profile,
         detailed=root.detailed or detailed,
-        no_color=root.no_color or no_color,
+        no_color=no_color,
     )
 
 
@@ -108,22 +125,29 @@ def main(
 
 
 @main.group(name="profile", invoke_without_command=True)
+@click.option("--no-color", is_flag=True, help="Disable terminal styling.")
 @click.pass_context
-def profile_command(ctx: click.Context) -> None:
+def profile_command(ctx: click.Context, no_color: bool) -> None:
     """List profiles, add/edit a profile, or save the default with use <name>.
 
     Listing and switching do not access credentials or contact HoYoLAB.
     --profile on status/check-in selects a profile for one invocation only.
     """
     if ctx.invoked_subcommand is None:
-        profile.list_profiles()
+        profile.list_profiles(
+            no_color=_resolve_options(ctx, profile=None, no_color=no_color).no_color
+        )
 
 
 @profile_command.command(name="use")
 @click.argument("name", metavar="<name>")
-def profile_use_command(name: str) -> None:
+@click.option("--no-color", is_flag=True, help="Disable terminal styling.")
+@click.pass_context
+def profile_use_command(ctx: click.Context, name: str, no_color: bool) -> None:
     """Save <name> as the default for future commands. Names must match exactly."""
-    profile.use_profile(name)
+    profile.use_profile(
+        name, no_color=_resolve_options(ctx, profile=None, no_color=no_color).no_color
+    )
 
 
 @profile_command.command(name="add")

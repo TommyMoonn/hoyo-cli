@@ -18,15 +18,9 @@ from hoyo_cli.config.editor import (
     EDITOR_HINT,
     ResolvedEditor,
     describe_editor,
-    editor_available,
     resolve_editor,
 )
-from hoyo_cli.config.models import (
-    AppConfig,
-    ordered_games,
-    resolve_login,
-    resolve_profile,
-)
+from hoyo_cli.config.models import resolve_profile
 from hoyo_cli.config.paths import config_path
 from hoyo_cli.config.repository import (
     commit_config,
@@ -36,52 +30,8 @@ from hoyo_cli.config.repository import (
     prepare_game_order,
 )
 from hoyo_cli.errors import AppError, ConfigError
+from hoyo_cli.render.management import ManagementPresenter
 from hoyo_cli.render.setup import SetupPresenter
-
-
-def show_config(config: AppConfig, path: Path) -> str:
-    lines = [
-        f"Config: {path}",
-        f"Default profile: {config.default_profile}",
-        f"Game order: {', '.join(config.game_order) or '(canonical fallback)'}",
-        f"Display color: {config.display_color}",
-        "Editor: " + describe_editor(config.editor_command),
-        "Editor executable: "
-        + ("available" if editor_available(config.editor_command) else "unavailable"),
-    ]
-    for name, profile in config.profiles.items():
-        login = resolve_login(config, profile)
-        lines.extend(
-            [
-                "",
-                f"Profile: {name}",
-                f"  Login: {profile.login}",
-                f"  Credential backend: {login.credential_backend}",
-            ]
-        )
-        any_enabled = False
-        for game in ordered_games(config):
-            selection = profile.games.get(game)
-            if selection is not None and selection.enabled:
-                lines.append(f"  {game}: enabled, UID {selection.uid}")
-                any_enabled = True
-            elif selection is not None:
-                lines.append(f"  {game}: disabled, UID {selection.uid}")
-            else:
-                lines.append(f"  {game}: not configured")
-        if not any_enabled:
-            lines.append("  No enabled games")
-    lines.extend(
-        [
-            "",
-            "Add profile: hoyo profile add",
-            "Update profile or session: hoyo profile edit <name>",
-            "Switch default: hoyo profile use <name>",
-            "Change game order: hoyo config order",
-            "Change editor: hoyo config editor",
-        ]
-    )
-    return "\n".join(lines)
 
 
 def run_order(path: Path, io: SetupIO | None = None, *, no_color: bool = False) -> None:
@@ -177,6 +127,9 @@ def edit_config(path: Path, editor: ResolvedEditor) -> int:
 def run_config(*, options: CommandOptions, edit: bool) -> None:
     path = config_path()
     config = load_config(path)
+    presenter = ManagementPresenter(
+        no_color=options.no_color, configured_color=config.display_color
+    )
     resolve_profile(config, options.profile)
     if edit:
         try:
@@ -208,12 +161,11 @@ def run_config(*, options: CommandOptions, edit: bool) -> None:
                         "in this file, then run hoyo config."
                     ),
                 ) from None
-            click.echo("Configuration validated after editor closed.", color=False)
+            presenter.success("Configuration validated after editor closed.")
         else:
-            click.echo(
+            presenter.message(
                 "Editor launched; file-close completion is unconfirmed. "
                 "After saving, run hoyo config to validate your edits.",
-                color=False,
             )
     else:
-        click.echo(show_config(config, path), color=False)
+        presenter.config(config, path)

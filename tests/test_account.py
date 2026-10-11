@@ -88,13 +88,19 @@ def test_listing_is_stable_and_marks_persisted_default_without_side_effects(
 ) -> None:
     original = profile_file.read_bytes()
     with forbid_authentication():
-        first = runner.invoke(main, ["profile"], terminal_width=width)
-        second = runner.invoke(main, ["--profile", "alt", "profile"])
+        first = runner.invoke(main, ["profile"], env={"COLUMNS": str(width)})
+        second = runner.invoke(
+            main, ["--profile", "alt", "profile"], env={"COLUMNS": str(width)}
+        )
     assert first.exit_code == second.exit_code == 0, first.output
     assert first.stdout == second.stdout
-    assert "moonn · Default · Login: moonn" in first.stdout
-    assert "alt · Login: alt" in first.stdout
-    assert first.stdout.index("  moonn") < first.stdout.index("  alt")
+    default_block = first.stdout.split("Profile: moonn\n", 1)[1].split("Profile:", 1)[0]
+    assert "Default" in default_block and "Login: moonn" in default_block
+    assert first.stdout.count("  Default\n") == 1
+    assert all(len(line) <= width for line in first.stdout.splitlines())
+    alt_block = first.stdout.split("Profile: alt\n", 1)[1]
+    assert "Login: alt" in alt_block and "Default" not in alt_block
+    assert first.stdout.index("Profile: moonn") < first.stdout.index("Profile: alt")
     assert "hoyo profile use <name>" in first.stdout
     assert "private-marker" not in first.output and "\x1b" not in first.output
     assert first.stderr == ""

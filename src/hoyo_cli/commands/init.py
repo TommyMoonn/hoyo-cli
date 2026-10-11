@@ -797,14 +797,13 @@ def _load_setup_config(config_file: Path) -> tuple[AppConfig | None, bytes | Non
         return None, None
 
 
-def _initialized_guidance() -> None:
-    click.echo(
-        "HoYo CLI is already set up.\n"
+def _initialized_guidance(presenter: SetupPresenter) -> None:
+    presenter.heading("HoYo CLI is already set up.")
+    presenter.message(
         "Add:      hoyo profile add\n"
         "Update:   hoyo profile edit <name>\n"
         "Switch:   hoyo profile use <name>\n"
         "Settings: hoyo config",
-        color=False,
     )
 
 
@@ -969,12 +968,12 @@ def _run_profile_setup(
 ) -> None:
     config, original = _load_setup_config(config_file)
     _validate_entrypoint(config, mode, requested_profile)
-    if mode == "first" and config is not None:
-        _initialized_guidance()
-        return
     presenter = SetupPresenter(
         no_color=no_color, configured_color=config.display_color if config else "auto"
     )
+    if mode == "first" and config is not None:
+        _initialized_guidance(presenter)
+        return
     io = setup_io(io, presenter)
     try:
         name = _run_setup(
@@ -1073,7 +1072,11 @@ def configure_profile(
         requested = options.profile if mode == "first" else name
         _validate_entrypoint(config, mode, requested)
         if mode == "first" and config is not None:
-            _initialized_guidance()
+            _initialized_guidance(
+                SetupPresenter(
+                    no_color=options.no_color, configured_color=config.display_color
+                )
+            )
             return
         components = (
             config_path(),
