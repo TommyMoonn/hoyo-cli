@@ -1,12 +1,14 @@
 """Spec acceptance through the CLI, with only external boundaries replaced."""
 
+import asyncio
+import io
 import re
 import subprocess
 import sys
 from datetime import timedelta
 from pathlib import Path
 from typing import cast
-from unittest.mock import call
+from unittest.mock import call, patch
 
 import genshin
 import pytest
@@ -14,14 +16,16 @@ from click.testing import CliRunner
 from conftest import TEST_COOKIE, TEST_UIDS, AcceptanceEnvironment
 from rich.cells import cell_len
 
-from hoyo_cli.auth.browser_import import BrowserProfile, BrowserSession
+from hoyo_cli.auth.browser_import import BrowserProfile, BrowserSession, browser_error
 from hoyo_cli.auth.credentials import parse_cookie_header
 from hoyo_cli.auth.plaintext_backend import PlaintextStore
 from hoyo_cli.cli import main
-from hoyo_cli.config.models import AccountConfig
+from hoyo_cli.config.models import AccountConfig, GameSelection
 from hoyo_cli.config.repository import load_config, save_account
+from hoyo_cli.errors import ErrorCode
 from hoyo_cli.hoyolab.discovery import CharacterRef
 from hoyo_cli.models.common import GAME_IDS, GameId
+from hoyo_cli.render import progress
 
 
 @pytest.mark.parametrize("width", [48, 70, 100])
@@ -86,6 +90,448 @@ RESOURCE: dict[GameId, tuple[str, str]] = {
     "hsr": ("Trailblaze Power", "211 / 300"),
     "zzz": ("Battery Charge", "89 / 240"),
 }
+
+
+def assert_safe_output(output: str, *, width: int | None = None) -> None:
+    assert all(
+        text not in output
+        for text in ("acceptance-secret-not-real", "Traceback", "\x1b", "\r")
+    )
+    if width is not None:
+        assert all(cell_len(line) <= width for line in output.splitlines())
+
+
+@pytest.mark.parametrize("width", [48, 70, 100])
+def test_mixed_fresh_stale_and_unavailable_journey(
+    runner: CliRunner, acceptance_env: AcceptanceEnvironment, width: int
+) -> None:
+    env = acceptance_env
+    env.width = width
+    assert runner.invoke(main, ["hsr"]).exit_code == 0
+    cached = next(env.cache.rglob("hsr.json"))
+    before = cached.read_bytes()
+    env.now += timedelta(hours=3)
+    env.notes("hsr").side_effect = TimeoutError("acceptance-secret-not-real")
+    env.notes("zzz").side_effect = RuntimeError("acceptance-secret-not-real")
+    result = runner.invoke(main, ["--no-color"])
+    assert result.exit_code == 0, result.output
+    assert "190 / 200" in result.stdout and "211 / 300" in result.stdout
+    assert "89 / 240" not in result.stdout
+    assert result.stdout.count("STALE · fetched 3h ago") == 1
+    assert result.stdout.count("No eligible cached status available") == 1
+    hsr_section = result.stdout.split("HONKAI: STAR RAIL")[1].split("ZENLESS")[0]
+    assert "Snapshot estimate" in hsr_section
+    assert "Full in" not in hsr_section
+    assert "Updated" not in result.stdout
+    assert not result.stderr
+    assert_safe_output(result.output, width=width)
+    assert cached.read_bytes() == before
+    assert {path.stem for path in env.cache.rglob("*.json")} == {"genshin", "hsr"}
+    env.client.get_reward_info.assert_not_called()
+    env.client.claim_daily_reward.assert_not_called()
+
+
+@pytest.mark.parametrize("isolation", ["account", "uid"])
+def test_cached_identity_cannot_cross_command_selection(
+    runner: CliRunner, acceptance_env: AcceptanceEnvironment, isolation: str
+) -> None:
+    env = acceptance_env
+    assert runner.invoke(main, ["genshin"]).exit_code == 0
+    before = {path: path.read_bytes() for path in env.cache.rglob("*.json")}
+    arguments = ["genshin"]
+    if isolation == "account":
+        arguments += ["--account", "alt"]
+    else:
+        config = load_config(env.config)
+        games = dict(config.accounts["main"].games)
+        games["genshin"] = GameSelection(True, TEST_UIDS["genshin"] + 1)
+        save_account(
+            env.config,
+            "main",
+            AccountConfig(env.backend, games),
+            make_default=True,
+            game_order=GAME_IDS,
+        )
+    env.notes("genshin").side_effect = TimeoutError("acceptance-secret-not-real")
+    result = runner.invoke(main, arguments)
+    assert result.exit_code == 1, result.output
+    assert "No eligible cached status available" in result.stdout
+    assert "190 / 200" not in result.stdout and "STALE" not in result.stdout
+    assert {path: path.read_bytes() for path in env.cache.rglob("*.json")} == before
+    env.client.claim_daily_reward.assert_not_called()
+    assert_safe_output(result.output)
+
+
+def test_unconfigured_first_run_never_accesses_secrets_or_network(
+    runner: CliRunner, acceptance_env: AcceptanceEnvironment
+) -> None:
+    env = acceptance_env
+    env.config.unlink()
+    result = runner.invoke(main, [])
+    assert result.exit_code == 2, result.output
+    assert "Run: hoyo init" in result.stderr
+    assert result.stdout == ""
+    env.keyring.get_password.assert_not_called()
+    assert env.client.mock_calls == []
+    assert not env.cache.exists()
+    assert_safe_output(result.output)
+
+
+@pytest.mark.parametrize("width", [48, 70, 100])
+@pytest.mark.parametrize("save", [True, False])
+def test_new_account_selection_review_and_cancel_journey(
+    runner: CliRunner, acceptance_env: AcceptanceEnvironment, width: int, save: bool
+) -> None:
+    env = acceptance_env
+    env.width = width
+    original = env.config.read_bytes()
+    secrets = env.credentials.read_bytes() if env.credentials.exists() else None
+    env.discovery.discover.return_value = {
+        game: (
+            CharacterRef(game, uid, "os_asia", f"First {game} / Asia"),
+            CharacterRef(game, uid + 1, "os_usa", f"Second {game} / America"),
+        )
+        for game, uid in TEST_UIDS.items()
+    }
+    backend = "1\n" if env.backend == "keyring" else "2\ny\n"
+    # Create account, manual session, second Genshin/first HSR, skip ZZZ,
+    # retain default account/order, storage consent, final Save/Cancel.
+    answers = (
+        "3\njourney\nn\n"
+        + TEST_COOKIE
+        + "\n2\n1\n3\nn\ny\n"
+        + backend
+        + ("1\n" if save else "2\n")
+    )
+    result = runner.invoke(main, ["init", "--no-color"], input=answers)
+    assert result.exit_code == (0 if save else 1), result.output
+    assert "Step 4/4" in result.stdout and "Review" in result.stdout
+    assert "Second genshin / America" in result.stdout
+    assert "First hsr / Asia" in result.stdout
+    assert "Skip this game" in result.stdout
+    assert "Enable game?" not in result.stdout
+    env.discovery.discover.assert_called_once_with(parse_cookie_header(TEST_COOKIE))
+    env.browser.list_sessions.assert_not_called()
+    env.browser.import_session.assert_not_called()
+    assert_safe_output(result.output)
+    if save:
+        config = load_config(env.config)
+        assert config.default_account == "main"
+        assert config.accounts["journey"].games == {
+            "genshin": GameSelection(True, TEST_UIDS["genshin"] + 1),
+            "hsr": GameSelection(True, TEST_UIDS["hsr"]),
+        }
+        assert "Configured account journey" in result.stdout
+    else:
+        assert env.config.read_bytes() == original
+        assert (
+            env.credentials.read_bytes() if env.credentials.exists() else None
+        ) == secrets
+        env.keyring.set_password.assert_not_called()
+        env.keyring.delete_password.assert_not_called()
+        assert "Setup cancelled; no changes saved" in result.stdout
+        assert "Configured account" not in result.stdout
+    assert env.client.mock_calls == []
+
+
+@pytest.mark.parametrize("save", [True, False])
+def test_settings_only_journey_with_unavailable_secrets(
+    runner: CliRunner, acceptance_env: AcceptanceEnvironment, save: bool
+) -> None:
+    env = acceptance_env
+    before = env.config.read_bytes()
+    env.keyring.get_password.side_effect = AssertionError("Settings read keyring")
+    env.credentials.write_text("Invalid store: acceptance-secret-not-real")
+    stored = env.credentials.read_bytes()
+    result = runner.invoke(
+        main,
+        ["init", "--account", "main", "--no-color"],
+        input="2\nn\n3\n2\n1\n" + ("1\n" if save else "2\n"),
+    )
+    assert result.exit_code == (0 if save else 1), result.output
+    assert "Review changes" in result.stdout
+    if save:
+        assert load_config(env.config).game_order == ("zzz", "hsr", "genshin")
+    else:
+        assert env.config.read_bytes() == before
+    assert env.credentials.read_bytes() == stored
+    env.keyring.get_password.assert_not_called()
+    env.keyring.set_password.assert_not_called()
+    env.keyring.delete_password.assert_not_called()
+    assert env.browser.mock_calls == [] and env.discovery.mock_calls == []
+    assert env.client.mock_calls == []
+    assert_safe_output(result.output)
+
+
+@pytest.mark.parametrize(
+    "code, message",
+    [
+        (ErrorCode.BROWSER_LOCKED, "locked"),
+        (ErrorCode.BROWSER_LOGIN_MISSING, "No complete HoYoLAB login"),
+    ],
+)
+@pytest.mark.parametrize("save", [True, False])
+def test_browser_recovery_manual_fallback_through_setup(
+    runner: CliRunner,
+    acceptance_env: AcceptanceEnvironment,
+    code: ErrorCode,
+    message: str,
+    save: bool,
+) -> None:
+    env = acceptance_env
+    before = env.config.read_bytes()
+    secrets = env.credentials.read_bytes() if env.credentials.exists() else None
+    env.browser.list_sessions.return_value = (BrowserSession("brave", "Brave", True),)
+    env.browser.list_profiles.return_value = (
+        BrowserProfile("brave:0", "brave", "Default"),
+        BrowserProfile("brave:1", "brave", "Profile 2"),
+    )
+    env.browser.import_session.side_effect = browser_error(code)
+    # Explicit session replacement, Brave/Profile 2, recover with manual input.
+    result = runner.invoke(
+        main,
+        ["init", "--account", "main", "--no-color"],
+        input="4\ny\ny\n1\n2\n3\n"
+        + TEST_COOKIE
+        + "\n1\n1\n1\n"
+        + ("1\n" if save else "2\n"),
+    )
+    assert result.exit_code == (0 if save else 1), result.output
+    assert message in result.stderr
+    assert (
+        "Browser recovery" in result.stdout and "Paste Cookie header" in result.stdout
+    )
+    assert "Session verified" in result.stdout
+    env.browser.import_session.assert_called_once_with("brave:1")
+    env.discovery.discover.assert_called_once_with(parse_cookie_header(TEST_COOKIE))
+    if not save:
+        assert env.config.read_bytes() == before
+        assert (
+            env.credentials.read_bytes() if env.credentials.exists() else None
+        ) == secrets
+        env.keyring.set_password.assert_not_called()
+        env.keyring.delete_password.assert_not_called()
+    assert env.client.mock_calls == []
+    assert_safe_output(result.output)
+
+
+@pytest.mark.parametrize("width", [48, 70, 100])
+@pytest.mark.parametrize(
+    "mode", ["tty", "stdout-pipe", "stderr-pipe", "NO_COLOR", "no-color", "CI", "dumb"]
+)
+def test_slow_three_game_command_terminal_matrix(
+    runner: CliRunner,
+    acceptance_env: AcceptanceEnvironment,
+    monkeypatch: pytest.MonkeyPatch,
+    width: int,
+    mode: str,
+) -> None:
+    env = acceptance_env
+    env.width = width
+    env.interactive = mode != "stdout-pipe"
+    monkeypatch.delenv("NO_COLOR", raising=False)
+    monkeypatch.delenv("CI", raising=False)
+    monkeypatch.setenv("TERM", "dumb" if mode == "dumb" else "xterm-256color")
+    if mode in ("NO_COLOR", "CI"):
+        monkeypatch.setenv(mode, "")
+    monkeypatch.setattr(progress, "PRESENTATION_DELAY", 0.005)
+    started: set[GameId] = set()
+
+    def slow_read(game: GameId, delay: float):
+        payload = env.notes(game).return_value
+
+        async def read(uid: int, *, autoauth: bool, return_raw_data: bool) -> object:
+            started.add(game)
+            await asyncio.sleep(delay)
+            assert started == set(GAME_IDS), "Status requests must run concurrently"
+            if game == "zzz":
+                raise RuntimeError("acceptance-secret-not-real")
+            return payload
+
+        return read
+
+    for game, delay in zip(GAME_IDS, (0.025, 0.05, 0.075), strict=True):
+        env.notes(game).side_effect = slow_read(game, delay)
+
+    def isatty(stream: io.TextIOWrapper) -> bool:
+        return stream.name != (
+            "<stdout>"
+            if mode == "stdout-pipe"
+            else "<stderr>"
+            if mode == "stderr-pipe"
+            else ""
+        )
+
+    with patch("click.testing._NamedTextIOWrapper.isatty", isatty):
+        result = runner.invoke(main, ["--no-color"] if mode == "no-color" else [])
+    assert result.exit_code == 0, result.output
+    assert "190 / 200" in result.stdout and "211 / 300" in result.stdout
+    assert "No eligible cached status available" in result.stdout
+    assert "Fetching status" not in result.stdout
+    assert "acceptance-secret-not-real" not in result.output
+    plain_stdout = re.sub(r"\x1b\[[0-9;?]*[A-Za-z]", "", result.stdout)
+    assert_safe_output(plain_stdout, width=width)
+    if mode == "tty":
+        for count in ("0/3", "1/3", "2/3", "3/3"):
+            assert count in result.stderr
+        assert "Fetching status" in result.stderr and "%" not in result.stderr
+        assert result.stderr.endswith("\x1b[2K")
+        assert "\x1b[?25h" in result.stderr
+    else:
+        assert result.stderr == ""
+    if mode in ("stdout-pipe", "NO_COLOR", "no-color", "dumb"):
+        assert_safe_output(result.stdout, width=width)
+    env.client.claim_daily_reward.assert_not_called()
+
+
+@pytest.mark.parametrize("command", [[], ["check-in"]])
+@pytest.mark.parametrize("signal", [KeyboardInterrupt, asyncio.CancelledError])
+def test_abrupt_gateway_cancel_cleans_terminal_and_preserves_stores(
+    runner: CliRunner,
+    acceptance_env: AcceptanceEnvironment,
+    monkeypatch: pytest.MonkeyPatch,
+    command: list[str],
+    signal: type[BaseException],
+) -> None:
+    env = acceptance_env
+    before = env.config.read_bytes()
+    secrets = env.credentials.read_bytes() if env.credentials.exists() else None
+    monkeypatch.setenv("TERM", "xterm-256color")
+    monkeypatch.delenv("NO_COLOR", raising=False)
+    monkeypatch.delenv("CI", raising=False)
+    monkeypatch.setattr(progress, "PRESENTATION_DELAY", 0.005)
+
+    async def cancel(*args: object, **kwargs: object) -> None:
+        await asyncio.sleep(0.025)
+        raise signal()
+
+    env.client.get_reward_info.side_effect = cancel
+    for game in GAME_IDS:
+        env.notes(game).side_effect = cancel
+    with patch("click.testing._NamedTextIOWrapper.isatty", return_value=True):
+        result = runner.invoke(main, command)
+    assert result.exit_code == 1, result.output
+    assert result.stdout == ""
+    assert "\x1b[?25h" in result.stderr
+    assert result.stderr.rfind("\x1b[2K") < result.stderr.index(
+        "cancelled" if signal is asyncio.CancelledError else "Aborted!"
+    )
+    assert env.config.read_bytes() == before
+    assert (
+        env.credentials.read_bytes() if env.credentials.exists() else None
+    ) == secrets
+    assert not list(env.cache.rglob("*.json"))
+    env.keyring.set_password.assert_not_called()
+    env.keyring.delete_password.assert_not_called()
+    env.client.claim_daily_reward.assert_not_called()
+
+
+@pytest.mark.parametrize("target", [None, *GAME_IDS])
+@pytest.mark.parametrize("already_claimed", [True, False])
+def test_explicit_check_in_scope_and_all_claimed_skip(
+    runner: CliRunner,
+    acceptance_env: AcceptanceEnvironment,
+    target: GameId | None,
+    already_claimed: bool,
+) -> None:
+    env = acceptance_env
+    env.client.get_reward_info.return_value = genshin.models.DailyRewardInfo(
+        signed_in=already_claimed, claimed_rewards=1 if already_claimed else 0
+    )
+    games = {
+        "genshin": genshin.Game.GENSHIN,
+        "hsr": genshin.Game.STARRAIL,
+        "zzz": genshin.Game.ZZZ,
+    }
+    requested = (target,) if target else GAME_IDS
+    result = runner.invoke(main, ["check-in", *([target] if target else [])])
+    assert result.exit_code == 0, result.output
+    assert result.stdout.count(
+        "Already checked in" if already_claimed else "Claimed"
+    ) == len(requested)
+    assert env.client.get_reward_info.await_args_list == [
+        call(game=games[game]) for game in requested
+    ]
+    assert env.client.claim_daily_reward.await_args_list == (
+        []
+        if already_claimed
+        else [call(game=games[game], reward=False) for game in requested]
+    )
+    for game in GAME_IDS:
+        env.notes(game).assert_not_called()
+    assert not env.cache.exists()
+    assert not result.stderr
+    assert_safe_output(result.output)
+
+
+@pytest.mark.parametrize("verified", [True, False])
+def test_slow_ambiguous_check_in_shows_read_only_verification_stage(
+    runner: CliRunner,
+    acceptance_env: AcceptanceEnvironment,
+    monkeypatch: pytest.MonkeyPatch,
+    verified: bool,
+) -> None:
+    env = acceptance_env
+    monkeypatch.setenv("TERM", "xterm-256color")
+    monkeypatch.delenv("CI", raising=False)
+    monkeypatch.delenv("NO_COLOR", raising=False)
+    monkeypatch.setattr(progress, "PRESENTATION_DELAY", 0.005)
+    reads = 0
+
+    async def state(*, game: genshin.Game) -> genshin.models.DailyRewardInfo:
+        nonlocal reads
+        reads += 1
+        await asyncio.sleep(0.025)
+        return genshin.models.DailyRewardInfo(
+            signed_in=verified and reads == 2, claimed_rewards=0
+        )
+
+    async def claim(*, game: genshin.Game, reward: bool) -> None:
+        await asyncio.sleep(0.025)
+        raise TimeoutError("acceptance-secret-not-real")
+
+    env.client.get_reward_info.side_effect = state
+    env.client.claim_daily_reward.side_effect = claim
+    with patch("click.testing._NamedTextIOWrapper.isatty", return_value=True):
+        result = runner.invoke(main, ["check-in", "hsr"])
+    assert result.exit_code == (0 if verified else 1), result.output
+    for label in ("Checking today's rewards", "Claiming", "Verifying"):
+        assert label in result.stderr and label not in result.stdout
+    assert "0/1" in result.stderr and "1/1" in result.stderr
+    assert result.stderr.endswith("\x1b[2K") and "\x1b[?25h" in result.stderr
+    assert ("Claimed (verified)" if verified else "Unconfirmed") in result.stdout
+    assert_safe_output(result.stdout)
+    assert reads == 2
+    env.client.claim_daily_reward.assert_awaited_once_with(
+        game=genshin.Game.STARRAIL, reward=False
+    )
+
+
+def test_mock_account_end_user_command_transcript(
+    runner: CliRunner,
+    acceptance_env: AcceptanceEnvironment,
+) -> None:
+    env = acceptance_env
+    env.client.get_reward_info.return_value = genshin.models.DailyRewardInfo(True, 1)
+    commands: list[tuple[list[str], str | None]] = [
+        (["--help"], None),
+        ([], None),
+        (["zzz"], None),
+        (["check-in", "--help"], None),
+        (["check-in", "hsr"], None),
+        (["init"], "1\n2\ny\n1\n"),
+        (["config"], None),
+    ]
+    for arguments, answers in commands:
+        result = runner.invoke(main, arguments, input=answers)
+        assert result.exit_code == 0, result.output
+        assert_safe_output(result.output)
+        print("$ hoyo " + " ".join(arguments))
+        print(result.output.replace(str(env.home), "<test-home>"))
+    env.client.claim_daily_reward.assert_not_called()
+    env.browser.list_sessions.assert_not_called()
+    env.browser.import_session.assert_not_called()
+    env.discovery.discover.assert_not_called()
 
 
 @pytest.mark.parametrize("width", [48, 70, 100])

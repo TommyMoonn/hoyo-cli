@@ -2,6 +2,7 @@
 
 import json
 import socket
+import sys
 from collections.abc import Callable
 from contextvars import ContextVar
 from dataclasses import dataclass
@@ -25,6 +26,7 @@ from hoyo_cli.config.repository import save_account
 from hoyo_cli.hoyolab.client import GatewayClient, GenshinPyGateway
 from hoyo_cli.hoyolab.discovery import CharacterRef
 from hoyo_cli.models.common import GAME_IDS, GameId
+from hoyo_cli.render import progress, setup
 from hoyo_cli.render.console import make_console
 
 
@@ -129,20 +131,33 @@ def acceptance_env(
         return GenshinPyGateway(credentials, client=client, now=lambda: env.now)
 
     def console(
-        *, width: int | None, no_color: bool, interactive: bool, configured_color: str
+        *,
+        width: int | None,
+        no_color: bool,
+        interactive: bool,
+        configured_color: str,
+        stderr: bool = False,
     ) -> Console:
-        return make_console(
+        result = make_console(
             width=env.width,
             no_color=no_color,
-            interactive=env.interactive,
+            interactive=sys.stderr.isatty() if stderr else env.interactive,
             configured_color=configured_color,
+            stderr=stderr,
         )
+        # Model the specified dimensions of a modern terminal. Rich otherwise
+        # forces dumb terminals to 80x25 or reserves a legacy Windows column.
+        result.legacy_windows = False
+        result.height = 25
+        return result
 
     monkeypatch.setattr(status, "GenshinPyGateway", gateway)
     monkeypatch.setattr(check_in, "GenshinPyGateway", gateway)
     monkeypatch.setattr(status, "_now", lambda: env.now)
     monkeypatch.setattr(status, "make_console", console)
     monkeypatch.setattr(check_in, "make_console", console)
+    monkeypatch.setattr(progress, "make_console", console)
+    monkeypatch.setattr(setup, "make_console", console)
     env.browser.list_sessions.return_value = ()
     monkeypatch.setattr(init, "SystemBrowserImporter", lambda: env.browser)
     env.discovery.discover.return_value = {

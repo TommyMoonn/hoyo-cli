@@ -1,6 +1,7 @@
 """Offline profile selection, isolated loaders, and Windows lock evidence."""
 
 import asyncio
+import base64
 import ctypes
 import importlib
 import io
@@ -9,22 +10,29 @@ import sqlite3
 import subprocess
 import sys
 import warnings
+from collections.abc import Generator
+from contextlib import contextmanager
 from http.cookiejar import Cookie, CookieJar
 from pathlib import Path
 from types import ModuleType
 from unittest.mock import patch
 
 import pytest
+from click.testing import CliRunner
+from conftest import TEST_COOKIE, AcceptanceEnvironment
 
 from hoyo_cli.auth import browser_worker
 from hoyo_cli.auth.browser_import import (
     BrowserCookieAdapter,
     BrowserProfile,
+    BrowserSession,
     SystemBrowserImporter,
     classify_browser_failure,
     read_browser_profile,
 )
 from hoyo_cli.auth.credentials import deserialize_credentials, parse_cookie_header
+from hoyo_cli.cli import main
+from hoyo_cli.commands import init
 from hoyo_cli.errors import BrowserImportError, ErrorCode
 
 
@@ -433,12 +441,10 @@ def test_real_isolated_reader_uses_synthetic_firefox_database(
     assert captured.out == captured.err == ""
 
 
-@pytest.mark.skipif(sys.platform != "win32", reason="Requires Windows file sharing")
-def test_real_windows_sharing_violation_is_classified_in_child(tmp_path: Path) -> None:
+@contextmanager
+def exclusive_windows_file(database: Path) -> Generator[None]:
     from ctypes import wintypes
 
-    database = tmp_path / "cookies.sqlite"
-    firefox_database(database)
     kernel = ctypes.WinDLL("kernel32", use_last_error=True)
     create = kernel.CreateFileW
     create.argtypes = [
@@ -457,10 +463,155 @@ def test_real_windows_sharing_violation_is_classified_in_child(tmp_path: Path) -
     handle = create(str(database), 0x80000000, 0, None, 3, 0x80, None)
     assert handle != wintypes.HANDLE(-1).value, ctypes.get_last_error()
     try:
+        yield
+    finally:
+        assert close(handle)
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Requires Windows file sharing")
+def test_real_windows_sharing_violation_is_classified_in_child(tmp_path: Path) -> None:
+    database = tmp_path / "cookies.sqlite"
+    firefox_database(database)
+    with exclusive_windows_file(database):
         with pytest.raises(BrowserImportError) as caught:
             read_browser_profile(
                 BrowserProfile("brave:0", "brave", "Synthetic", database)
             )
         assert caught.value.code == ErrorCode.BROWSER_LOCKED
+    # Closing the synthetic lock permits the real isolated reader to run again.
+    credentials = read_browser_profile(
+        BrowserProfile("firefox:0", "firefox", "Synthetic", database)
+    )
+    assert dict(credentials.fields) == {"ltuid": "123", "ltoken": "test-secret-123"}
+
+
+def synthetic_windows_key() -> str:
+    """Protect a disposable Chromium key, never touching browser/OS secret stores."""
+    from ctypes import wintypes
+
+    class Blob(ctypes.Structure):
+        _fields_ = [("size", wintypes.DWORD), ("data", ctypes.POINTER(ctypes.c_byte))]
+
+    data = (ctypes.c_byte * 32)(*range(32))
+    source = Blob(32, data)
+    target = Blob()
+    protect = ctypes.WinDLL("crypt32", use_last_error=True).CryptProtectData
+    protect.argtypes = [
+        ctypes.POINTER(Blob),
+        wintypes.LPCWSTR,
+        ctypes.POINTER(Blob),
+        wintypes.LPVOID,
+        wintypes.LPVOID,
+        wintypes.DWORD,
+        ctypes.POINTER(Blob),
+    ]
+    protect.restype = wintypes.BOOL
+    assert protect(
+        ctypes.byref(source), None, None, None, None, 1, ctypes.byref(target)
+    ), ctypes.get_last_error()
+    free = ctypes.WinDLL("kernel32", use_last_error=True).LocalFree
+    free.argtypes = [wintypes.HLOCAL]
+    free.restype = wintypes.HLOCAL
+    try:
+        protected = ctypes.string_at(target.data, target.size)
+        return base64.b64encode(b"DPAPI" + protected).decode("ascii")
     finally:
-        assert close(handle)
+        assert not free(ctypes.cast(target.data, wintypes.HLOCAL))
+
+
+def synthetic_brave_profiles(tmp_path: Path) -> tuple[SystemBrowserImporter, Path]:
+    root = tmp_path / "Local/BraveSoftware/Brave-Browser/User Data"
+    for name in ("Default", "Profile 2"):
+        database = root / name / "Network/Cookies"
+        database.parent.mkdir(parents=True)
+        connection = sqlite3.connect(database)
+        try:
+            connection.execute("CREATE TABLE meta (key TEXT, value TEXT)")
+            connection.execute("INSERT INTO meta VALUES ('version', '23')")
+            connection.execute(
+                "CREATE TABLE cookies (host_key TEXT, path TEXT, is_secure INTEGER, "
+                "expires_utc INTEGER, name TEXT, value TEXT, encrypted_value BLOB, "
+                "is_httponly INTEGER)"
+            )
+            # Only the Default profile has a synthetic login. Profile 2 is empty.
+            if name == "Default":
+                connection.executemany(
+                    "INSERT INTO cookies VALUES "
+                    "('.hoyolab.com', '/', 1, 0, ?, ?, X'', 1)",
+                    [("ltuid", "123"), ("ltoken", "acceptance-secret-not-real")],
+                )
+            connection.commit()
+        finally:
+            connection.close()
+    (root / "Local State").write_text(
+        json.dumps({"os_crypt": {"encrypted_key": synthetic_windows_key()}}),
+        encoding="utf-8",
+    )
+    return SystemBrowserImporter(
+        windows_adapter(tmp_path)
+    ), root / "Default/Network/Cookies"
+
+
+@pytest.mark.skipif(
+    sys.platform != "win32", reason="Requires Windows DPAPI/file sharing"
+)
+def test_windows_brave_profiles_open_lock_closed_and_missing_login(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    importer, database = synthetic_brave_profiles(tmp_path)
+    assert importer.list_sessions() == (BrowserSession("brave", "Brave", True),)
+    profiles = importer.list_profiles("brave")
+    assert [profile.label for profile in profiles] == [
+        "Stable / Default",
+        "Stable / Profile 2",
+    ]
+    with exclusive_windows_file(database):
+        with pytest.raises(BrowserImportError) as caught:
+            importer.import_session(profiles[0].source_id)
+        assert caught.value.code == ErrorCode.BROWSER_LOCKED
+        assert "Close the selected browser fully" in (caught.value.hint or "")
+    credentials = importer.import_session(profiles[0].source_id)
+    assert credentials == parse_cookie_header(TEST_COOKIE)
+    with pytest.raises(BrowserImportError) as caught:
+        importer.import_session(profiles[1].source_id)
+    assert caught.value.code == ErrorCode.BROWSER_LOGIN_MISSING
+    assert str(tmp_path) not in caught.value.message
+    captured = capsys.readouterr()
+    assert captured.out == captured.err == ""
+
+
+@pytest.mark.skipif(
+    sys.platform != "win32", reason="Requires Windows DPAPI/file sharing"
+)
+def test_windows_brave_lock_recovers_in_real_init_without_saving_on_cancel(
+    runner: CliRunner,
+    acceptance_env: AcceptanceEnvironment,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    env = acceptance_env
+    importer, database = synthetic_brave_profiles(tmp_path)
+    monkeypatch.setattr(init, "SystemBrowserImporter", lambda: importer)
+    before = env.config.read_bytes()
+    secrets = env.credentials.read_bytes() if env.credentials.exists() else None
+    with exclusive_windows_file(database):
+        result = runner.invoke(
+            main,
+            ["init", "--account", "main", "--no-color"],
+            input="4\ny\ny\n1\n1\n3\n" + TEST_COOKIE + "\n1\n1\n1\n2\n",
+        )
+    assert result.exit_code == 1, result.output
+    assert "cookie database is locked" in result.stderr
+    assert "Close the selected browser fully" in result.stderr
+    assert "Browser recovery" in result.stdout and "Session verified" in result.stdout
+    assert "Setup cancelled; no changes saved" in result.stdout
+    assert "acceptance-secret-not-real" not in result.output
+    assert "Traceback" not in result.output and "\x1b" not in result.output
+    assert "WinError" not in result.output and str(database) not in result.output
+    assert env.config.read_bytes() == before
+    assert (
+        env.credentials.read_bytes() if env.credentials.exists() else None
+    ) == secrets
+    env.discovery.discover.assert_called_once_with(parse_cookie_header(TEST_COOKIE))
+    env.keyring.set_password.assert_not_called()
+    env.keyring.delete_password.assert_not_called()
