@@ -9,9 +9,11 @@ import ctypes
 import importlib
 import io
 import json
+import sqlite3
 import sys
+import time
 import warnings
-from contextlib import redirect_stderr, redirect_stdout
+from contextlib import closing, redirect_stderr, redirect_stdout
 from http.cookiejar import CookieJar
 from pathlib import Path
 from typing import Protocol, cast
@@ -93,8 +95,14 @@ def load_selected(
         raise browser_error(ErrorCode.BROWSER_UNSUPPORTED)
     # Opening preserves OS evidence that the library's fallback can swallow.
     # It does not read contents or probe another profile.
+    app_bound = False
     if cookie_file is not None:
-        _preflight_database(cookie_file)
+        try:
+            _preflight_database(cookie_file)
+            if sys.platform == "win32" and browser != "firefox":
+                app_bound = _has_app_bound_cookies(cookie_file)
+        except Exception as error:
+            raise classify_browser_failure(error) from None
     library = importlib.import_module("browser_cookie3")
     # Only this private child process changes the dependency's fallback setting.
     library.__dict__["shadowcopy"] = None
@@ -102,9 +110,46 @@ def load_selected(
     if not callable(loader):
         raise browser_error(ErrorCode.BROWSER_UNSUPPORTED)
     reader = cast(CookieLoader, loader)
-    return extract_credentials(
-        reader(domain_name="hoyolab.com", cookie_file=cookie_file, key_file=key_file)
-    )
+    try:
+        return extract_credentials(
+            reader(
+                domain_name="hoyolab.com", cookie_file=cookie_file, key_file=key_file
+            )
+        )
+    except Exception as error:
+        failure = classify_browser_failure(error)
+        # Always attempt the supported reader: usable legacy cookies win even
+        # when the selected database also contains protected rows. Storage,
+        # access, conflicts, and unknown faults keep their independent causes.
+        if app_bound and failure.code in (
+            ErrorCode.BROWSER_DECRYPTION,
+            ErrorCode.BROWSER_LOGIN_MISSING,
+        ):
+            failure = browser_error(ErrorCode.BROWSER_ENCRYPTION_UNSUPPORTED)
+        raise failure from None
+
+
+def _has_app_bound_cookies(cookie_file: str) -> bool:
+    """Inspect only format metadata in the selected Windows Chromium database.
+
+    Normal read-only SQLite locking sees committed WAL data. Do not fall back to
+    immutable/nolock reads or copies, which can hide locks or miss WAL evidence.
+    The query returns a boolean, never cookie values or ciphertext.
+    """
+    uri = Path(cookie_file).absolute().as_uri() + "?mode=ro"
+    with closing(sqlite3.connect(uri, uri=True, timeout=0.25)) as connection:
+        placeholders = ",".join("?" for _ in COOKIE_FIELDS)
+        row = connection.execute(
+            "SELECT EXISTS (SELECT 1 FROM cookies WHERE "
+            "(lower(ltrim(host_key, '.')) = 'hoyolab.com' OR "
+            "lower(ltrim(host_key, '.')) LIKE '%.hoyolab.com') "
+            f"AND name IN ({placeholders}) "
+            "AND (value IS NULL OR value = '') "
+            "AND (expires_utc = 0 OR expires_utc > ?) "
+            "AND substr(encrypted_value, 1, 3) = ?)",
+            (*COOKIE_FIELDS, int((time.time() + 11644473600) * 1000000), b"v20"),
+        ).fetchone()
+        return bool(row and row[0])
 
 
 def main() -> None:

@@ -358,6 +358,7 @@ def test_settings_only_journey_with_unavailable_secrets(
     [
         (ErrorCode.BROWSER_LOCKED, "locked"),
         (ErrorCode.BROWSER_LOGIN_MISSING, "No complete HoYoLAB login"),
+        (ErrorCode.BROWSER_ENCRYPTION_UNSUPPORTED, "app-bound encryption"),
     ],
 )
 @pytest.mark.parametrize("save", [True, False])
@@ -381,7 +382,8 @@ def test_browser_recovery_manual_fallback_through_setup(
     result = runner.invoke(
         main,
         ["profile", "edit", "main", "--no-color"],
-        input="3\ny\n2\n1\n2\n3\n"
+        input="3\ny\n2\n1\n2\n"
+        + ("1\n" if code == ErrorCode.BROWSER_ENCRYPTION_UNSUPPORTED else "3\n")
         + "123\nacceptance-secret-not-real"
         + "\n1\n1\n1\n"
         + ("1\n" if save else "2\n"),
@@ -393,6 +395,9 @@ def test_browser_recovery_manual_fallback_through_setup(
         and "Enter ltuid_v2 / ltoken_v2 manually" in result.stdout
     )
     assert "Session verified" in result.stdout
+    if code == ErrorCode.BROWSER_ENCRYPTION_UNSUPPORTED:
+        assert "manually (recommended)" in result.stdout
+        assert "Retry browser import" not in result.stdout
     env.browser.import_session.assert_called_once_with("brave:1")
     env.discovery.discover.assert_called_once_with(
         manual_credentials("123", "acceptance-secret-not-real")

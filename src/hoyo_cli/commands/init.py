@@ -66,6 +66,7 @@ _Result = TypeVar("_Result")
 _MANUAL_SOURCE = "Enter HoYoLAB cookie values (recommended)"
 _BROWSER_SOURCE = "Import from browser (best effort)"
 _MANUAL_ENTRY = "Enter ltuid_v2 / ltoken_v2 manually"
+_MANUAL_RECOMMENDED = f"{_MANUAL_ENTRY} (recommended)"
 _MANUAL_REENTRY = "Enter ltuid_v2 / ltoken_v2 again"
 
 
@@ -224,6 +225,7 @@ def _session(
     profile: BrowserProfile | None = None
     credentials: Credentials | None = None
     while True:
+        failure_code: ErrorCode | None = None
         try:
             if use_browser and profile is None:
                 profile = _browser_profile(io, browser)
@@ -259,6 +261,7 @@ def _session(
             # application exceptions and control signals leave this boundary.
             if error.code == ErrorCode.UNEXPECTED:
                 raise
+            failure_code = error.code
             click.echo(format_error(error), err=True, color=False)
             if error.code in (ErrorCode.AUTH_REJECTED, ErrorCode.API_REJECTED):
                 click.echo(
@@ -283,11 +286,14 @@ def _session(
                 color=False,
             )
         recovery = _session_recovery(
-            io, use_browser=use_browser, has_credentials=credentials is not None
+            io,
+            use_browser=use_browser,
+            has_credentials=credentials is not None,
+            failure_code=failure_code,
         )
         if recovery == "Cancel (no changes)":
             raise click.Abort()
-        if recovery == _MANUAL_ENTRY:
+        if recovery in (_MANUAL_ENTRY, _MANUAL_RECOMMENDED):
             use_browser, profile, credentials = False, None, None
         if recovery == "Choose another browser/profile":
             profile, credentials = None, None
@@ -298,8 +304,16 @@ def _session(
             profile, credentials = None, None
 
 
-def _session_recovery(io: SetupIO, *, use_browser: bool, has_credentials: bool) -> str:
-    if use_browser:
+def _session_recovery(
+    io: SetupIO,
+    *,
+    use_browser: bool,
+    has_credentials: bool,
+    failure_code: ErrorCode | None = None,
+) -> str:
+    if use_browser and failure_code == ErrorCode.BROWSER_ENCRYPTION_UNSUPPORTED:
+        choices = (_MANUAL_RECOMMENDED, "Choose another browser/profile")
+    elif use_browser:
         retry = (
             "Retry session verification" if has_credentials else "Retry browser import"
         )

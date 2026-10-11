@@ -305,7 +305,12 @@ def test_worker_control_signals_are_not_classified(
 
 def test_selected_loader_receives_exact_cookie_and_key_paths(tmp_path: Path) -> None:
     database, key = tmp_path / "Cookies", tmp_path / "Local State"
-    database.touch()
+    connection = sqlite3.connect(database)
+    connection.execute(
+        "CREATE TABLE cookies (host_key TEXT, name TEXT, value TEXT, "
+        "encrypted_value BLOB, expires_utc INTEGER)"
+    )
+    connection.close()
     jar = cookie_jar(
         [
             (".hoyolab.com", "ltuid", "123"),
@@ -580,6 +585,31 @@ def test_windows_brave_profiles_open_lock_closed_and_missing_login(
         importer.import_session(profiles[1].source_id)
     assert caught.value.code == ErrorCode.BROWSER_LOGIN_MISSING
     assert str(tmp_path) not in caught.value.message
+    captured = capsys.readouterr()
+    assert captured.out == captured.err == ""
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Requires Windows DPAPI")
+def test_real_windows_worker_reports_selected_app_bound_cookies(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    importer, database = synthetic_brave_profiles(tmp_path)
+    connection = sqlite3.connect(database)
+    try:
+        connection.execute(
+            "UPDATE cookies SET value = '', encrypted_value = ? WHERE name = 'ltoken'",
+            (b"v20" + b"opaque-protected-data" * 4,),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+    profiles = importer.list_profiles("brave")
+    with pytest.raises(BrowserImportError) as caught:
+        importer.import_session(profiles[0].source_id)
+    assert caught.value.code == ErrorCode.BROWSER_ENCRYPTION_UNSUPPORTED
+    assert "app-bound encryption" in caught.value.message
+    assert "ltuid_v2 / ltoken_v2 manually (recommended)" in (caught.value.hint or "")
+    assert "opaque" not in str(caught.value) and str(tmp_path) not in str(caught.value)
     captured = capsys.readouterr()
     assert captured.out == captured.err == ""
 

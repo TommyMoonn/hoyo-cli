@@ -7,6 +7,7 @@ selected reader runs in a child process to contain dependency diagnostics.
 import configparser
 import json
 import os
+import sqlite3
 import subprocess
 import sys
 from collections.abc import Mapping
@@ -64,19 +65,29 @@ _RECOVERY: dict[ErrorCode, tuple[str, str]] = {
     ),
     ErrorCode.BROWSER_PROFILE_MISSING: (
         "The selected browser profile or cookie database is unavailable.",
-        "Open the intended browser profile, then choose it again or use manual input.",
+        "Open the intended browser profile, then choose it again or enter "
+        "ltuid_v2 / ltoken_v2 manually.",
     ),
     ErrorCode.BROWSER_LOGIN_MISSING: (
         "No complete HoYoLAB login cookies were found in this profile.",
-        "Sign in to HoYoLAB in the selected profile, then retry browser import.",
+        "Sign in to HoYoLAB in the selected profile, then retry browser import "
+        "or enter ltuid_v2 / ltoken_v2 manually.",
     ),
     ErrorCode.BROWSER_COOKIES_CONFLICT: (
         "The selected profile contains conflicting authentication cookies.",
-        "Sign in again in that profile, choose another profile, or use manual input.",
+        "Sign in again in that profile, choose another profile, or enter "
+        "ltuid_v2 / ltoken_v2 manually.",
     ),
     ErrorCode.BROWSER_DECRYPTION: (
         "This browser's cookie encryption cannot be read by the supported reader.",
         "Choose another supported source or enter ltuid_v2 / ltoken_v2 manually.",
+    ),
+    ErrorCode.BROWSER_ENCRYPTION_UNSUPPORTED: (
+        "The selected HoYoLAB cookies use app-bound encryption, "
+        "which this browser reader does not support.",
+        "Enter ltuid_v2 / ltoken_v2 manually (recommended), or choose another "
+        "supported browser/profile. Retrying this profile will not resolve "
+        "unsupported encryption.",
     ),
     ErrorCode.BROWSER_UNSUPPORTED: (
         "This browser or profile selection is not supported on this platform.",
@@ -112,10 +123,21 @@ def classify_browser_failure(error: Exception) -> BrowserImportError:
         return error
     if isinstance(error, OSError) and getattr(error, "winerror", None) == 32:
         return browser_error(ErrorCode.BROWSER_LOCKED)
-    if isinstance(error, PermissionError):
+    if isinstance(error, PermissionError) or (
+        isinstance(error, OSError) and getattr(error, "winerror", None) == 5
+    ):
         return browser_error(ErrorCode.BROWSER_ACCESS_DENIED)
     if isinstance(error, FileNotFoundError):
         return browser_error(ErrorCode.BROWSER_PROFILE_MISSING)
+    if isinstance(error, OSError):
+        return browser_error(ErrorCode.BROWSER_STORAGE)
+    if isinstance(error, sqlite3.Error):
+        code = getattr(error, "sqlite_errorcode", 0) & 0xFF
+        if code in (sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED):
+            return browser_error(ErrorCode.BROWSER_LOCKED)
+        if code in (sqlite3.SQLITE_PERM, sqlite3.SQLITE_AUTH):
+            return browser_error(ErrorCode.BROWSER_ACCESS_DENIED)
+        return browser_error(ErrorCode.BROWSER_STORAGE)
     # Exact diagnostics verified in browser-cookie3 0.20.1. Unknown exceptions
     # must not be diagnosed as locks or decryption failures by substring guessing.
     if type(error).__module__ == "browser_cookie3":

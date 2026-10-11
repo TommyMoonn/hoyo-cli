@@ -22,6 +22,7 @@ class ErrorCode(StrEnum):
     BROWSER_LOGIN_MISSING = "browser_login_missing"
     BROWSER_COOKIES_CONFLICT = "browser_cookies_conflict"
     BROWSER_DECRYPTION = "browser_decryption"
+    BROWSER_ENCRYPTION_UNSUPPORTED = "browser_encryption_unsupported"
     BROWSER_UNSUPPORTED = "browser_unsupported"
     BROWSER_STORAGE = "browser_storage"
     BROWSER_TIMEOUT = "browser_timeout"
