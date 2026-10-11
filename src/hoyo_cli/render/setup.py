@@ -1,8 +1,10 @@
 """Width-aware, non-secret setup presentation, independent of prompts and writes."""
 
+import shutil
 import sys
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 
+from rich.padding import Padding
 from rich.text import Text
 
 from hoyo_cli.config.models import CredentialBackend, GameSelection
@@ -33,19 +35,66 @@ class SetupPresenter:
             interactive=sys.stdout.isatty(),
             configured_color=configured_color,
         )
+        self.error_console = make_console(
+            width=self.console.width,
+            no_color=no_color,
+            interactive=sys.stdout.isatty() and sys.stderr.isatty(),
+            configured_color=configured_color,
+            stderr=True,
+        )
+        # Rich otherwise fixes dumb terminals at 80 columns, even with COLUMNS.
+        # Keep guided transcripts within the terminal's advertised dimensions.
+        for console in (self.console, self.error_console):
+            if console.is_dumb_terminal:
+                console.size = shutil.get_terminal_size()
 
     def message(self, message: str) -> None:
         self.console.print(Text(message))
 
+    def heading(self, label: str) -> None:
+        self.console.print(Text(label, style="heading"))
+
+    def current(self, message: str) -> None:
+        self.console.print(Text(message, style="heading"))
+
+    def warning(self, message: str, *, stderr: bool = False) -> None:
+        console = self.error_console if stderr else self.console
+        console.print(Text(message, style="warning"))
+
+    def success(self, message: str) -> None:
+        self.console.print(Text(message, style="success"))
+
+    def choices(self, choices: Sequence[str], *, default: int = 1) -> None:
+        for index, choice in enumerate(choices, 1):
+            row = Text()
+            row.append(f"{index}. ", style="heading")
+            row.append(choice, style="text")
+            if index == default:
+                row.append(" (Default)", style="heading")
+            # Keep every number visible and indent wrapped labels, including
+            # paths and long server names. Never truncate a selectable action.
+            self.console.print(Padding(row, (0, 0, 0, 2), expand=False))
+
+    def prompt_label(self, label: str) -> str:
+        # Click still owns the prompt, suffix, validation, defaults and getpass.
+        # Capture only the literal label, reserving room for Click's [Y/n]/[1].
+        with self.console.capture() as captured:
+            self.console.print(
+                Text(label, style="heading"),
+                end="",
+                width=max(1, self.console.width - 7),
+            )
+        return captured.get()
+
     def step(self, number: int, label: str, profile: str | None = None) -> None:
         self.console.print()
-        self.message(f"Step {number}/4 · {label}")
+        self.heading(f"Step {number}/4 · {label}")
         if profile is not None:
             self.message(f"Profile: {profile}")
 
     def game(self, game: GameId) -> None:
         self.console.print()
-        self.message(GAME_NAMES[game])
+        self.console.print(Text(GAME_NAMES[game], style=f"game.{game}"))
 
     def review(
         self,
@@ -64,7 +113,7 @@ class SetupPresenter:
             self.step(4, "Review", name)
         else:
             self.console.print()
-            self.message(f"Review changes · Profile: {name}")
+            self.heading(f"Review changes · Profile: {name}")
         for game in GAME_IDS:
             selection = games.get(game)
             if selection is None:
@@ -77,11 +126,14 @@ class SetupPresenter:
                 else f"UID {selection.uid} (retained selection, unverified)"
             )
             state = "Enabled" if selection.enabled else "Disabled"
-            self.message(f"{GAME_NAMES[game]}: {state}")
-            self.message(f"  {identity}")
+            row = Text()
+            row.append(f"{GAME_NAMES[game]}: ", style="heading")
+            row.append(state, style="text")
+            self.console.print(row)
+            self.console.print(Padding(Text(identity), (0, 0, 0, 2), expand=False))
         self.message(f"Login: {login}")
         self.message(f"Credential storage: {backend}")
-        self.message(f"Default profile: {default_profile}")
+        self.current(f"Default profile: {default_profile}")
         self.message("Game order: " + ", ".join(order))
         if editor is not None:
             self.message("Editor: " + editor)

@@ -8,11 +8,11 @@ import click
 
 from hoyo_cli.commands import CommandOptions
 from hoyo_cli.commands.init import (
-    ClickSetupIO,
     SetupIO,
     choose_setup_option,
     select_editor,
     select_game_order,
+    setup_io,
 )
 from hoyo_cli.config.editor import (
     EDITOR_HINT,
@@ -84,63 +84,75 @@ def show_config(config: AppConfig, path: Path) -> str:
     return "\n".join(lines)
 
 
-def run_order(path: Path, io: SetupIO) -> None:
+def run_order(path: Path, io: SetupIO | None = None, *, no_color: bool = False) -> None:
     config, original = load_config_snapshot(path)
-    order = select_game_order(io, config)
-    prepared = prepare_game_order(path, order)
-    if prepared.original != original:
-        raise ConfigError(
-            "Configuration changed during game order selection.",
-            hint="Retry hoyo config order.",
-        )
-    click.echo("Review game order: " + ", ".join(order), color=False)
-    if (
-        choose_setup_option(io, "Save game order?", ("Save", "Cancel (no changes)"))
-        != "Save"
-    ):
-        raise click.Abort()
-    if prepared.content.encode("utf-8") != original:
-        commit_config(prepared)
-    click.echo("Game order: " + ", ".join(order), color=False)
-
-
-def configure_order() -> None:
+    presenter = SetupPresenter(no_color=no_color, configured_color=config.display_color)
+    io = setup_io(io, presenter)
+    presenter.heading("Game display order")
+    presenter.current("Current game order: " + ", ".join(config.game_order))
     try:
-        run_order(config_path(), ClickSetupIO())
+        order = select_game_order(io, config)
+        prepared = prepare_game_order(path, order)
+        if prepared.original != original:
+            raise ConfigError(
+                "Configuration changed during game order selection.",
+                hint="Retry hoyo config order.",
+            )
+        presenter.heading("Review game order: " + ", ".join(order))
+        if (
+            choose_setup_option(io, "Save game order?", ("Save", "Cancel (no changes)"))
+            != "Save"
+        ):
+            raise click.Abort()
+        if prepared.content.encode("utf-8") != original:
+            commit_config(prepared)
+            presenter.success("Game order: " + ", ".join(order))
+        else:
+            presenter.message("Game order: " + ", ".join(order))
     except (click.Abort, KeyboardInterrupt):
-        click.echo("Game order cancelled; no changes saved.", color=False)
+        presenter.message("Game order cancelled; no changes saved.")
         raise
 
 
-def run_editor(path: Path, io: SetupIO, *, no_color: bool = False) -> None:
+def configure_order(*, no_color: bool = False) -> None:
+    run_order(config_path(), no_color=no_color)
+
+
+def run_editor(
+    path: Path, io: SetupIO | None = None, *, no_color: bool = False
+) -> None:
     config, original = load_config_snapshot(path)
     presenter = SetupPresenter(no_color=no_color, configured_color=config.display_color)
-    command = select_editor(io, presenter, config.editor_command)
-    prepared = prepare_editor(path, command)
-    if prepared.original != original:
-        raise ConfigError(
-            "Configuration changed during editor selection.",
-            hint="Retry hoyo config editor.",
-        )
-    presenter.message("Review editor: " + describe_editor(command))
-    if (
-        choose_setup_option(
-            io, "Save editor preference?", ("Save", "Cancel (no changes)")
-        )
-        != "Save"
-    ):
-        raise click.Abort()
-    if prepared.content.encode("utf-8") != original:
-        commit_config(prepared)
-    presenter.message("Editor: " + describe_editor(command))
+    io = setup_io(io, presenter)
+    presenter.heading("Editor preference")
+    try:
+        command = select_editor(io, presenter, config.editor_command)
+        prepared = prepare_editor(path, command)
+        if prepared.original != original:
+            raise ConfigError(
+                "Configuration changed during editor selection.",
+                hint="Retry hoyo config editor.",
+            )
+        presenter.heading("Review editor: " + describe_editor(command))
+        if (
+            choose_setup_option(
+                io, "Save editor preference?", ("Save", "Cancel (no changes)")
+            )
+            != "Save"
+        ):
+            raise click.Abort()
+        if prepared.content.encode("utf-8") != original:
+            commit_config(prepared)
+            presenter.success("Editor: " + describe_editor(command))
+        else:
+            presenter.message("Editor: " + describe_editor(command))
+    except (click.Abort, KeyboardInterrupt):
+        presenter.message("Editor cancelled; no changes saved.")
+        raise
 
 
 def configure_editor(*, no_color: bool = False) -> None:
-    try:
-        run_editor(config_path(), ClickSetupIO(), no_color=no_color)
-    except (click.Abort, KeyboardInterrupt):
-        click.echo("Editor cancelled; no changes saved.", color=False)
-        raise
+    run_editor(config_path(), no_color=no_color)
 
 
 def edit_config(path: Path, editor: ResolvedEditor) -> int:

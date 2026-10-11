@@ -326,5 +326,7 @@ def test_browser_selection_transcripts_wrap_without_secret_or_progress_output(
     assert "Reading browser cookies" not in transcript + result.output
     # The ordinary status sentence remains useful in redirected output; only
     # the transient progress display must be suppressed.
-    assert result.output.count("Cookies found. Verifying HoYoLAB session.") == 1
+    assert (transcript + result.output).count(
+        "Cookies found. Verifying HoYoLAB session."
+    ) == 1
     assert "\r" not in transcript + result.output

@@ -177,7 +177,7 @@ def test_order_conflict_retains_external_change_and_never_accesses_credentials(
             return choices[-1]
 
     with (
-        patch("hoyo_cli.commands.config.ClickSetupIO", return_value=EditingIO()),
+        patch("hoyo_cli.commands.config.setup_io", return_value=EditingIO()),
         patch("hoyo_cli.commands.init.open_store") as store,
     ):
         result = runner.invoke(main, ["config", "order"])

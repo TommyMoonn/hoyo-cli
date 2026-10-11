@@ -77,29 +77,41 @@ class SetupIO(Protocol):
 
 
 class ClickSetupIO:
-    def __init__(self) -> None:
-        self.presenter = SetupPresenter(no_color=True)
+    def __init__(self, presenter: SetupPresenter) -> None:
+        self.presenter = presenter
 
     def choose(self, prompt: str, choices: Sequence[str]) -> str:
         if not choices:
-            return click.prompt(prompt, type=str)
-        for index, choice in enumerate(choices, 1):
-            self.presenter.message(f"  {index}. {choice}")
+            return click.prompt(self.presenter.prompt_label(prompt), type=str)
         cancel = "Cancel (no changes)"
         has_cancel = cancel in choices
         maximum = len(choices) if has_cancel else len(choices) + 1
-        if not has_cancel:
-            self.presenter.message(f"  {maximum}. {cancel}")
-        index = click.prompt(prompt, type=click.IntRange(1, maximum), default=1)
+        self.presenter.choices(choices if has_cancel else (*choices, cancel))
+        index = click.prompt(
+            self.presenter.prompt_label(prompt),
+            type=click.IntRange(1, maximum),
+            default=1,
+        )
         if not has_cancel and index == maximum:
             raise click.Abort()
         return choices[index - 1]
 
     def confirm(self, prompt: str, *, default: bool = False) -> bool:
-        return click.confirm(prompt, default=default)
+        return click.confirm(self.presenter.prompt_label(prompt), default=default)
 
     def secret(self, prompt: str) -> str:
-        return click.prompt(prompt, hide_input=True, type=str)
+        return click.prompt(
+            self.presenter.prompt_label(prompt), hide_input=True, type=str
+        )
+
+
+def setup_io(io: SetupIO | None, presenter: SetupPresenter) -> SetupIO:
+    """Use one presenter at the Click boundary, retaining injected fake I/O."""
+    if io is None:
+        return ClickSetupIO(presenter)
+    if isinstance(io, ClickSetupIO):
+        io.presenter = presenter
+    return io
 
 
 def choose_setup_option(io: SetupIO, prompt: str, choices: Sequence[str]) -> str:
@@ -117,8 +129,13 @@ def _confirm(io: SetupIO, prompt: str, *, default: bool = False) -> bool:
     return io.confirm(prompt)
 
 
-def _profile_name(io: SetupIO, config: AppConfig | None, requested: str | None) -> str:
-    name = requested if requested is not None else _new_profile_name(io)
+def _profile_name(
+    io: SetupIO,
+    presenter: SetupPresenter,
+    config: AppConfig | None,
+    requested: str | None,
+) -> str:
+    name = requested if requested is not None else _new_profile_name(io, presenter)
     if not _valid_profile_name(name):
         raise ConfigError(
             "Profile name must be non-empty and contain no control characters."
@@ -139,12 +156,14 @@ def _valid_profile_name(name: str) -> bool:
     return True
 
 
-def _new_profile_name(io: SetupIO) -> str:
+def _new_profile_name(io: SetupIO, presenter: SetupPresenter) -> str:
     while True:
         name = choose_setup_option(io, "Profile name", ())
         if _valid_profile_name(name):
             return name
-        click.echo("Profile name must be non-empty and contain no control characters.")
+        presenter.warning(
+            "Profile name must be non-empty and contain no control characters."
+        )
         if (
             choose_setup_option(
                 io,
@@ -172,18 +191,19 @@ def _observed_work(
     return asyncio.run(run())
 
 
-def _browser_profile(io: SetupIO, browser: BrowserImporter) -> BrowserProfile | None:
-    presenter = SetupPresenter(no_color=True)
+def _browser_profile(
+    io: SetupIO, browser: BrowserImporter, presenter: SetupPresenter
+) -> BrowserProfile | None:
     sessions = browser.list_sessions()
     choices = [session.browser_label for session in sessions]
     if not sessions:
-        presenter.message(
+        presenter.warning(
             "No supported browser sources are available. "
             "Enter ltuid_v2 / ltoken_v2 manually."
         )
         return None
     if not any(session.supports_profiles for session in sessions):
-        presenter.message(
+        presenter.warning(
             "Browser/profile selection not available on this platform. "
             "The library chooses a profile; installed profiles and HoYoLAB "
             "login state have not been checked. Manual two-field entry is recommended.",
@@ -221,6 +241,7 @@ def _session(
     io: SetupIO,
     browser: BrowserImporter,
     discovery: CharacterDiscovery,
+    presenter: SetupPresenter,
     *,
     no_color: bool,
     configured_color: str,
@@ -232,7 +253,7 @@ def _session(
         failure_code: ErrorCode | None = None
         try:
             if use_browser and profile is None:
-                profile = _browser_profile(io, browser)
+                profile = _browser_profile(io, browser, presenter)
                 if profile is None:
                     use_browser = False
             if credentials is None:
@@ -243,7 +264,7 @@ def _session(
                         no_color=no_color,
                         configured_color=configured_color,
                     )
-                    click.echo("Cookies found. Verifying HoYoLAB session.", color=False)
+                    presenter.message("Cookies found. Verifying HoYoLAB session.")
                 else:
                     credentials = manual_credentials(
                         io.secret("ltuid_v2 (HoYoLAB account ID, hidden)"),
@@ -255,7 +276,7 @@ def _session(
                 no_color=no_color,
                 configured_color=configured_color,
             )
-            click.echo("Session verified.", color=False)
+            presenter.success("Session verified.")
         except ConfigError:
             # Forged menu values or invalid adapter configuration are not a
             # recoverable session failure.
@@ -266,19 +287,18 @@ def _session(
             if error.code == ErrorCode.UNEXPECTED:
                 raise
             failure_code = error.code
-            click.echo(format_error(error), err=True, color=False)
+            presenter.warning(format_error(error), stderr=True)
             if error.code in (ErrorCode.AUTH_REJECTED, ErrorCode.API_REJECTED):
-                click.echo(
+                presenter.warning(
                     "The session was not verified. Sign in to HoYoLAB again and "
                     "re-enter both cookie values, or choose browser import. "
                     "Some sessions or endpoints may require additional cookies.",
-                    err=True,
-                    color=False,
+                    stderr=True,
                 )
         else:
             if any(discovered.values()):
                 return credentials, discovered
-            click.echo(
+            presenter.warning(
                 format_error(
                     ConfigError(
                         "No supported linked game characters were found "
@@ -286,8 +306,7 @@ def _session(
                         hint="Retry discovery or choose a session with linked games.",
                     )
                 ),
-                err=True,
-                color=False,
+                stderr=True,
             )
         recovery = _session_recovery(
             io,
@@ -359,7 +378,7 @@ def _backend(
         store = open_store(selected, path)
         store.get(name)
     if selected == "plaintext":
-        presenter.message(
+        presenter.warning(
             f"Warning: {path} will contain login credentials in plaintext. "
             "User-only permissions are requested; "
             "Windows uses inherited directory ACLs.",
@@ -393,7 +412,7 @@ def select_editor(
 ) -> tuple[str, ...] | None:
     """Shared global picker; detection and review never launch an editor."""
     presets = detected_editors()
-    presenter.message("Current editor: " + describe_editor(current))
+    presenter.current("Current editor: " + describe_editor(current))
     presenter.message(
         "Only detected presets are listed. Add an editor to PATH or use its full path."
     )
@@ -428,10 +447,10 @@ def select_editor(
                 command = presets[selected]
             resolve_editor_command(command)
         except ConfigError as error:
-            presenter.message(error.message)
+            presenter.warning(error.message)
             presenter.message("Choose an available executable; no changes saved.")
             continue
-        presenter.message("Selected editor: " + describe_editor(command))
+        presenter.current("Selected editor: " + describe_editor(command))
         return command
 
 
@@ -459,7 +478,7 @@ def _select_games(
     if staged:
         presenter.step(2, "Games", name)
     else:
-        presenter.message(f"Games · Profile: {name}")
+        presenter.heading(f"Games · Profile: {name}")
     # A retained UID is recovery metadata, not evidence of ownership by the
     # selected session. Only a current discovery choice may enable a game.
     games: dict[GameId, GameSelection] = (
@@ -478,10 +497,9 @@ def _select_games(
             presenter.message("No linked characters; this game will stay disabled.")
             prior = previous.games.get(game) if previous is not None else None
             if prior is not None and prior.enabled:
-                click.echo(
+                presenter.warning(
                     f"{game}: not linked to this session; will be disabled if saved. "
                     "Previous UID retained for manual recovery.",
-                    color=False,
                 )
             continue
         character = _character(io, game, characters)
@@ -537,6 +555,7 @@ def _new_profile(
         io,
         browser,
         discovery,
+        presenter,
         no_color=no_color,
         configured_color=config.display_color if config else "auto",
     )
@@ -608,8 +627,9 @@ def _edit_games(
         current = games.get(game)
         choices = ["Keep current selection" if current else "Skip this game"]
         if current:
-            presenter.message(
-                f"{'Enabled' if current.enabled else 'Disabled'} · UID {current.uid} "
+            presenter.current(
+                f"Current: {'Enabled' if current.enabled else 'Disabled'} · "
+                f"UID {current.uid} "
                 "(retained selection, unverified)"
             )
             if current.enabled:
@@ -629,7 +649,7 @@ def _edit_games(
                     no_color=no_color,
                     configured_color=config.display_color,
                 )
-                presenter.message("Saved session verified.")
+                presenter.success("Saved session verified.")
             linked = discovered.get(game, ())
             if not linked:
                 raise ConfigError(
@@ -711,6 +731,7 @@ def _existing_profile(
             io,
             browser,
             discovery,
+            presenter,
             no_color=no_color,
             configured_color=config.display_color,
         )
@@ -762,7 +783,7 @@ def _authorize_login_change(
         name for name, profile in config.profiles.items() if profile.login == login
     ]
     presenter.message(f"Login: {login}")
-    presenter.message("Affected profiles: " + ", ".join(affected))
+    presenter.warning("Affected profiles: " + ", ".join(affected))
     if not io.confirm(f"{action} for all linked profiles ({', '.join(affected)})?"):
         raise click.Abort()
 
@@ -826,28 +847,23 @@ def _run_setup(
     io: SetupIO,
     browser: BrowserImporter,
     discovery: CharacterDiscovery,
+    presenter: SetupPresenter,
+    config: AppConfig | None,
+    original: bytes | None,
     *,
     mode: Literal["first", "add", "edit"],
     requested_profile: str | None = None,
     no_color: bool = False,
-) -> str | None:
-    config, original = _load_setup_config(config_file)
-    _validate_entrypoint(config, mode, requested_profile)
-    if mode == "first" and config is not None:
-        _initialized_guidance()
-        return None
-    presenter = SetupPresenter(
-        no_color=no_color, configured_color=config.display_color if config else "auto"
-    )
+) -> str:
     existing = mode == "edit"
     if existing:
-        presenter.message("Edit profile")
+        presenter.heading("Edit profile")
         assert config is not None and requested_profile is not None
         name = requested_profile
     else:
-        presenter.message("First profile setup" if mode == "first" else "Add profile")
+        presenter.heading("First profile setup" if mode == "first" else "Add profile")
         presenter.step(1, "Profile")
-        name = _profile_name(io, config, requested_profile)
+        name = _profile_name(io, presenter, config, requested_profile)
     presenter.message(f"Profile: {name}")
     changes = (
         _existing_profile(
@@ -943,7 +959,7 @@ def _run_setup(
 def _run_profile_setup(
     config_file: Path,
     credentials_file: Path,
-    io: SetupIO,
+    io: SetupIO | None,
     browser: BrowserImporter,
     discovery: CharacterDiscovery,
     *,
@@ -951,6 +967,15 @@ def _run_profile_setup(
     requested_profile: str | None = None,
     no_color: bool = False,
 ) -> None:
+    config, original = _load_setup_config(config_file)
+    _validate_entrypoint(config, mode, requested_profile)
+    if mode == "first" and config is not None:
+        _initialized_guidance()
+        return
+    presenter = SetupPresenter(
+        no_color=no_color, configured_color=config.display_color if config else "auto"
+    )
+    io = setup_io(io, presenter)
     try:
         name = _run_setup(
             config_file,
@@ -958,21 +983,23 @@ def _run_profile_setup(
             io,
             browser,
             discovery,
+            presenter,
+            config,
+            original,
             mode=mode,
             requested_profile=requested_profile,
             no_color=no_color,
         )
     except (click.Abort, KeyboardInterrupt, asyncio.CancelledError):
-        click.echo("Setup cancelled; no changes saved.", color=False)
+        presenter.message("Setup cancelled; no changes saved.")
         raise
-    if name is not None:
-        click.echo(f"Configured profile {name}. Run hoyo to continue.", color=False)
+    presenter.success(f"Configured profile {name}. Run hoyo to continue.")
 
 
 def run_init(
     config_file: Path,
     credentials_file: Path,
-    io: SetupIO,
+    io: SetupIO | None,
     browser: BrowserImporter,
     discovery: CharacterDiscovery,
     *,
@@ -994,7 +1021,7 @@ def run_init(
 def run_add_profile(
     config_file: Path,
     credentials_file: Path,
-    io: SetupIO,
+    io: SetupIO | None,
     browser: BrowserImporter,
     discovery: CharacterDiscovery,
     *,
@@ -1016,7 +1043,7 @@ def run_add_profile(
 def run_edit_profile(
     config_file: Path,
     credentials_file: Path,
-    io: SetupIO,
+    io: SetupIO | None,
     browser: BrowserImporter,
     discovery: CharacterDiscovery,
     *,
@@ -1051,7 +1078,7 @@ def configure_profile(
         components = (
             config_path(),
             credentials_path(),
-            ClickSetupIO(),
+            None,
             SystemBrowserImporter(),
             HoYoLABDiscovery(),
         )

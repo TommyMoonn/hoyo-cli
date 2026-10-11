@@ -66,6 +66,10 @@ def _resolve_options(
     detailed: bool = False,
 ) -> CommandOptions:
     root = ctx.find_root().ensure_object(CommandOptions)
+    parent = ctx.parent
+    while parent is not None:
+        no_color = no_color or bool(parent.params.get("no_color", False))
+        parent = parent.parent
     return CommandOptions(
         profile=profile if profile is not None else root.profile,
         detailed=root.detailed or detailed,
@@ -268,9 +272,13 @@ def config_command(
 
 
 @config_command.command(name="order")
-def config_order_command() -> None:
+@click.option("--no-color", is_flag=True, help="Disable terminal styling.")
+@click.pass_context
+def config_order_command(ctx: click.Context, no_color: bool) -> None:
     """Change only the global game display order, then review and save."""
-    config.configure_order()
+    config.configure_order(
+        no_color=_resolve_options(ctx, profile=None, no_color=no_color).no_color
+    )
 
 
 @config_command.command(name="editor")
