@@ -385,7 +385,42 @@ def test_config_shows_paths_names_and_uids_not_secrets(
         assert expected in output
     assert "private-marker" not in output
     assert "ltoken" not in output
-    assert "333333333" not in output  # Disabled game UIDs are not shown as enabled.
+    assert "zzz: disabled, UID 333333333" in output
+    assert "genshin: not configured" in output
+    assert "Run: hoyo init" in output
+
+
+@pytest.mark.parametrize("width", [48, 70, 100])
+def test_config_inspection_preserves_long_names_and_disabled_selections_without_secrets(
+    runner: CliRunner,
+    tmp_path: Path,
+    config_document: TOMLDocument,
+    width: int,
+) -> None:
+    name = "A long account name [with brackets] and several servers"
+    config_document["accounts"][name] = config_document["accounts"].pop("main")
+    config_document["default_account"] = name
+    config = tmp_path / "config.toml"
+    config.write_text(tomlkit.dumps(config_document), encoding="utf-8")
+    before = config.read_bytes()
+    with (
+        patch("hoyo_cli.commands.config.config_path", return_value=config),
+        patch("hoyo_cli.auth.credentials.open_store") as store,
+        patch("hoyo_cli.auth.keyring_backend.KeyringStore.get") as keyring_get,
+        patch("hoyo_cli.auth.plaintext_backend.PlaintextStore.get") as plaintext_get,
+    ):
+        result = runner.invoke(main, ["config", "--no-color"], terminal_width=width)
+    assert result.exit_code == 0, result.output
+    assert f"Default account: {name}" in result.output
+    assert f"Account: {name}" in result.output
+    assert "zzz: disabled, UID 333333333" in result.output
+    assert "hsr: not configured" in result.output
+    assert "Run: hoyo init" in result.output
+    assert "private-marker" not in result.output and "\x1b" not in result.output
+    store.assert_not_called()
+    keyring_get.assert_not_called()
+    plaintext_get.assert_not_called()
+    assert config.read_bytes() == before
 
 
 def test_config_edit_invokes_selected_editor(tmp_path: Path) -> None:

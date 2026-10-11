@@ -121,6 +121,33 @@ def test_help_identifies_hoyo(runner: CliRunner) -> None:
     assert "Usage: hoyo" in result.output
 
 
+@pytest.mark.parametrize("command", [[], ["init"], ["config"]])
+def test_help_connects_setup_settings_and_normal_commands(
+    runner: CliRunner, command: list[str]
+) -> None:
+    result = runner.invoke(main, [*command, "--help"])
+    assert result.exit_code == 0
+    if command == ["init"]:
+        for action in (
+            "Games and characters",
+            "Game order",
+            "Default account",
+            "Update HoYoLAB session",
+            "Credential storage",
+        ):
+            assert action in result.output
+    elif command == ["config"]:
+        assert "hoyo init" in result.output
+    else:
+        for example in (
+            "hoyo init",
+            "hoyo genshin",
+            "hoyo check-in zzz",
+            "hoyo config",
+        ):
+            assert example in result.output
+
+
 def test_version_uses_installed_metadata(runner: CliRunner) -> None:
     result = runner.invoke(main, ["--version"])
     assert result.exit_code == 0

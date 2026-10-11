@@ -56,8 +56,13 @@ class SetupPresenter:
         backend: CredentialBackend,
         default_account: str,
         order: tuple[GameId, ...],
+        staged: bool = True,
     ) -> None:
-        self.step(4, "Review", name)
+        if staged:
+            self.step(4, "Review", name)
+        else:
+            self.console.print()
+            self.message(f"Review changes · Account: {name}")
         for game in GAME_IDS:
             selection = games.get(game)
             if selection is None:
@@ -67,7 +72,7 @@ class SetupPresenter:
             identity = (
                 character_choice(character)
                 if character is not None
-                else f"UID {selection.uid} (retained, not verified)"
+                else f"UID {selection.uid} (retained selection)"
             )
             state = "Enabled" if selection.enabled else "Disabled"
             self.message(f"{GAME_NAMES[game]}: {state}")

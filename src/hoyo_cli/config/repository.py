@@ -132,6 +132,7 @@ def prepare_account(
     *,
     make_default: bool,
     game_order: tuple[GameId, ...],
+    default_account: str | None = None,
 ) -> PreparedConfig:
     _reject_symlink(path)
     if path.exists():
@@ -145,7 +146,9 @@ def prepare_account(
         document["game_order"] = list(game_order)
         document["display"] = tomlkit.table().add("color", "auto")
 
-    if make_default:
+    if default_account is not None:
+        _set_field(document, "default_account", default_account)
+    elif make_default:
         _set_field(document, "default_account", name)
     _set_field(document, "game_order", list(game_order))
     accounts = _ensure_table(document, "accounts")

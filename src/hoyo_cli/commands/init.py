@@ -2,6 +2,7 @@
 
 import asyncio
 from collections.abc import Callable, Sequence
+from dataclasses import dataclass
 from functools import partial
 from pathlib import Path
 from typing import Literal, Protocol, TypeVar, cast
@@ -329,34 +330,29 @@ def _game_order(io: SetupIO, config: AppConfig | None) -> tuple[GameId, ...]:
     return tuple(order)
 
 
-def _run_init(
-    config_file: Path,
-    credentials_file: Path,
+def _character(
     io: SetupIO,
-    browser: BrowserImporter,
-    discovery: CharacterDiscovery,
+    game: GameId,
+    characters: tuple[CharacterRef, ...],
+) -> CharacterRef | None:
+    choices = [character_choice(char) for char in characters]
+    selected = _choose(io, f"Character for {game}", (*choices, "Skip this game"))
+    return None if selected == "Skip this game" else characters[choices.index(selected)]
+
+
+def _select_games(
+    io: SetupIO,
+    presenter: SetupPresenter,
+    name: str,
+    discovered: dict[GameId, tuple[CharacterRef, ...]],
+    previous: AccountConfig | None,
     *,
-    requested_account: str | None = None,
-    no_color: bool = False,
-) -> str:
-    config = load_config(config_file) if config_file.exists() else None
-    presenter = SetupPresenter(
-        no_color=no_color, configured_color=config.display_color if config else "auto"
-    )
-    presenter.step(1, "Account")
-    name = _account_name(io, config, requested_account)
-    presenter.message(f"Account: {name}")
-    previous = config.accounts.get(name) if config is not None else None
-    if previous is not None and not io.confirm("Replace existing account credentials?"):
-        raise click.Abort()
-    credentials, discovered = _session(
-        io,
-        browser,
-        discovery,
-        no_color=no_color,
-        configured_color=config.display_color if config else "auto",
-    )
-    presenter.step(2, "Games", name)
+    staged: bool = True,
+) -> tuple[dict[GameId, GameSelection], dict[GameId, CharacterRef]]:
+    if staged:
+        presenter.step(2, "Games", name)
+    else:
+        presenter.message(f"Games · Account: {name}")
     # A retained UID is recovery metadata, not evidence of ownership by the
     # selected session. Only a current discovery choice may enable a game.
     games: dict[GameId, GameSelection] = (
@@ -381,53 +377,305 @@ def _run_init(
                     color=False,
                 )
             continue
-        choices = [character_choice(char) for char in characters]
-        selected = _choose(io, f"Character for {game}", (*choices, "Skip this game"))
-        if selected == "Skip this game":
+        character = _character(io, game, characters)
+        if character is None:
             continue
-        character = characters[choices.index(selected)]
         selected_characters[game] = character
         games[game] = GameSelection(True, character.uid)
+    _require_enabled(games)
+    return games, selected_characters
+
+
+def _require_enabled(games: dict[GameId, GameSelection]) -> None:
     if not any(selection.enabled for selection in games.values()):
         raise ConfigError("Select at least one enabled game; no files were changed.")
+
+
+@dataclass(frozen=True, repr=False)
+class _SetupChanges:
+    account: AccountConfig
+    characters: dict[GameId, CharacterRef]
+    default_account: str
+    order: tuple[GameId, ...]
+    secret_update: tuple[CredentialStore, Credentials] | None = None
+
+
+def _new_account(
+    io: SetupIO,
+    browser: BrowserImporter,
+    discovery: CharacterDiscovery,
+    presenter: SetupPresenter,
+    credentials_file: Path,
+    name: str,
+    config: AppConfig | None,
+    *,
+    no_color: bool,
+) -> _SetupChanges:
+    credentials, discovered = _session(
+        io,
+        browser,
+        discovery,
+        no_color=no_color,
+        configured_color=config.display_color if config else "auto",
+    )
+    games, characters = _select_games(io, presenter, name, discovered, None)
     make_default = config is None or _confirm(
         io, f"Use {name} as the default account?", default=True
     )
     order = _game_order(io, config)
     presenter.step(3, "Storage", name)
     backend, store = _backend(io, credentials_file, name, presenter)
-    if previous is not None and backend != previous.credential_backend:
-        if not io.confirm("Change this account's credential backend?"):
-            raise click.Abort()
-    if previous is None and store.get(name) is not None:
+    if store.get(name) is not None:
         if not io.confirm("Replace existing stored credentials for this account name?"):
             raise click.Abort()
+    return _SetupChanges(
+        AccountConfig(backend, games),
+        characters,
+        name if make_default or config is None else config.default_account,
+        order,
+        (store, credentials),
+    )
+
+
+def _saved_session(
+    account: AccountConfig, credentials_file: Path, name: str
+) -> Credentials:
+    credentials = open_store(account.credential_backend, credentials_file).get(name)
+    if credentials is None:
+        raise CredentialError(
+            "No stored HoYoLAB session is available for this account.",
+            code=ErrorCode.CREDENTIALS_MISSING,
+            hint="Run hoyo init and select Update HoYoLAB session.",
+        )
+    return credentials
+
+
+def _edit_games(
+    io: SetupIO,
+    presenter: SetupPresenter,
+    discovery: CharacterDiscovery,
+    config: AppConfig,
+    name: str,
+    credentials_file: Path,
+    *,
+    no_color: bool,
+) -> tuple[dict[GameId, GameSelection], dict[GameId, CharacterRef]]:
+    account = config.accounts[name]
+    games = dict(account.games)
+    characters: dict[GameId, CharacterRef] = {}
+    discovered: dict[GameId, tuple[CharacterRef, ...]] | None = None
+    for game in GAME_IDS:
+        presenter.game(game)
+        current = games.get(game)
+        choices = ["Keep current selection" if current else "Skip this game"]
+        if current:
+            presenter.message(
+                f"{'Enabled' if current.enabled else 'Disabled'} · UID {current.uid}"
+            )
+            if current.enabled:
+                choices.append("Disable this game")
+        else:
+            presenter.message("Not configured")
+        choices.append("Choose linked character")
+        action = _choose(io, f"Game settings for {game}", choices)
+        if action == "Disable this game" and current:
+            games[game] = GameSelection(False, current.uid)
+        elif action == "Choose linked character":
+            if discovered is None:
+                credentials = _saved_session(account, credentials_file, name)
+                discovered = _observed_work(
+                    "session_verify",
+                    partial(discovery.discover, credentials),
+                    no_color=no_color,
+                    configured_color=config.display_color,
+                )
+                presenter.message("Saved session verified.")
+            linked = discovered.get(game, ())
+            if not linked:
+                raise ConfigError(
+                    f"No linked characters were found for {game} in the saved session.",
+                    hint=(
+                        "Keep this game disabled, or select Update HoYoLAB session "
+                        "in hoyo init."
+                    ),
+                )
+            character = _character(io, game, linked)
+            if character is not None:
+                games[game] = GameSelection(True, character.uid)
+                characters[game] = character
+            elif current:
+                games[game] = GameSelection(False, current.uid)
+    _require_enabled(games)
+    return games, characters
+
+
+def _existing_account(
+    io: SetupIO,
+    browser: BrowserImporter,
+    discovery: CharacterDiscovery,
+    presenter: SetupPresenter,
+    credentials_file: Path,
+    name: str,
+    config: AppConfig,
+    *,
+    no_color: bool,
+) -> _SetupChanges:
+    action = _choose(
+        io,
+        "Account settings",
+        (
+            "Games and characters",
+            "Game order",
+            "Default account",
+            "Update HoYoLAB session",
+            "Credential storage",
+            "Cancel (no changes)",
+        ),
+    )
+    if action == "Cancel (no changes)":
+        raise click.Abort()
+    presenter.message(f"Change: {action}")
+    account = config.accounts[name]
+    characters: dict[GameId, CharacterRef] = {}
+    default_account, order = config.default_account, config.game_order
+    secret_update: tuple[CredentialStore, Credentials] | None = None
+    if action == "Games and characters":
+        games, characters = _edit_games(
+            io,
+            presenter,
+            discovery,
+            config,
+            name,
+            credentials_file,
+            no_color=no_color,
+        )
+        account = AccountConfig(account.credential_backend, games)
+    elif action == "Game order":
+        order = _game_order(io, config)
+    elif action == "Default account":
+        default_account = _choose(
+            io,
+            "Default account",
+            (
+                config.default_account,
+                *(
+                    other
+                    for other in config.accounts
+                    if other != config.default_account
+                ),
+            ),
+        )
+    elif action == "Update HoYoLAB session":
+        if not io.confirm("Replace existing account credentials?"):
+            raise click.Abort()
+        credentials, discovered = _session(
+            io,
+            browser,
+            discovery,
+            no_color=no_color,
+            configured_color=config.display_color,
+        )
+        games, characters = _select_games(
+            io, presenter, name, discovered, account, staged=False
+        )
+        account = AccountConfig(account.credential_backend, games)
+        secret_update = (
+            open_store(account.credential_backend, credentials_file),
+            credentials,
+        )
+    elif action == "Credential storage":
+        if not io.confirm("Change this account's credential backend?"):
+            raise click.Abort()
+        credentials = _saved_session(account, credentials_file, name)
+        backend, store = _backend(io, credentials_file, name, presenter)
+        if backend != account.credential_backend:
+            if store.get(name) is not None and not io.confirm(
+                "Replace existing stored credentials in the selected backend?"
+            ):
+                raise click.Abort()
+            account = AccountConfig(backend, account.games)
+            secret_update = (store, credentials)
+    return _SetupChanges(account, characters, default_account, order, secret_update)
+
+
+def _run_init(
+    config_file: Path,
+    credentials_file: Path,
+    io: SetupIO,
+    browser: BrowserImporter,
+    discovery: CharacterDiscovery,
+    *,
+    requested_account: str | None = None,
+    no_color: bool = False,
+) -> str:
+    config = load_config(config_file) if config_file.exists() else None
+    presenter = SetupPresenter(
+        no_color=no_color, configured_color=config.display_color if config else "auto"
+    )
+    if config is None:
+        presenter.step(1, "Account")
+    else:
+        presenter.message("Account setup and settings")
+    name = _account_name(io, config, requested_account)
+    presenter.message(f"Account: {name}")
+    existing = config is not None and name in config.accounts
+    if config is not None and not existing:
+        presenter.step(1, "Account", name)
+    changes = (
+        _existing_account(
+            io,
+            browser,
+            discovery,
+            presenter,
+            credentials_file,
+            name,
+            config,
+            no_color=no_color,
+        )
+        if config is not None and existing
+        else _new_account(
+            io,
+            browser,
+            discovery,
+            presenter,
+            credentials_file,
+            name,
+            config,
+            no_color=no_color,
+        )
+    )
     prepared = prepare_account(
         config_file,
         name,
-        AccountConfig(backend, games),
-        make_default=make_default,
-        game_order=order,
+        changes.account,
+        make_default=changes.default_account == name,
+        game_order=changes.order,
+        default_account=changes.default_account,
     )
     presenter.review(
         name=name,
-        games=games,
-        characters=selected_characters,
-        backend=backend,
-        default_account=name
-        if make_default or config is None
-        else config.default_account,
-        order=order,
+        games=changes.account.games,
+        characters=changes.characters,
+        backend=changes.account.credential_backend,
+        default_account=changes.default_account,
+        order=changes.order,
+        staged=not existing,
     )
     if (
         _choose(
             io,
-            "Save account configuration and credentials?",
+            "Save account configuration and credentials?"
+            if changes.secret_update
+            else "Save account settings?",
             ("Save", "Cancel (no changes)"),
         )
         != "Save"
     ):
         raise click.Abort()
+    if changes.secret_update is None:
+        commit_config(prepared)
+        return name
+    store, credentials = changes.secret_update
     restore = store.checkpoint(name)
     try:
         store.put(name, credentials)

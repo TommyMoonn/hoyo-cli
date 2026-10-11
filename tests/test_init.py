@@ -20,8 +20,8 @@ from hoyo_cli.auth.keyring_backend import KeyringStore
 from hoyo_cli.auth.plaintext_backend import PlaintextStore
 from hoyo_cli.cli import main
 from hoyo_cli.commands.init import run_init
-from hoyo_cli.config.models import GameSelection, enabled_games
-from hoyo_cli.config.repository import load_config
+from hoyo_cli.config.models import AccountConfig, GameSelection, enabled_games
+from hoyo_cli.config.repository import commit_config, load_config, save_account
 from hoyo_cli.errors import (
     AppError,
     AuthenticationError,
@@ -504,9 +504,11 @@ class FakeIO:
         browser: bool = False,
         replace: bool = True,
         cancel: str = "",
+        action: str = "Update HoYoLAB session",
     ) -> None:
         self.name, self.backend, self.browser = name, backend, browser
         self.replace, self.cancel = replace, cancel
+        self.action = action
         self.prompts: list[str] = []
 
     def choose(self, prompt: str, choices: Sequence[str]) -> str:
@@ -517,6 +519,8 @@ class FakeIO:
             return self.name
         if prompt == "Account":
             return self.name if self.name in choices else "Create new account"
+        if prompt == "Account settings":
+            return self.action
         if prompt == "Credential backend":
             return self.backend
         if prompt == "HoYoLAB session":
@@ -1086,14 +1090,23 @@ def test_uid_enabled_flags_and_custom_order_are_selected(tmp_path: Path) -> None
     assert "hsr" not in parsed.accounts["main"].games
 
 
-def test_backend_change_keeps_old_secrets_without_migration(tmp_path: Path) -> None:
+def test_explicit_storage_change_copies_saved_session_and_keeps_old_secrets(
+    tmp_path: Path,
+) -> None:
     config, secrets = tmp_path / "config.toml", tmp_path / "credentials.toml"
     run_init(config, secrets, FakeIO(), FakeBrowser(), FakeDiscovery())
     original = secrets.read_bytes()
     store = KeyringStore(MemoryKeyring())
-    with patch("hoyo_cli.commands.init.open_store", return_value=store):
+    with patch(
+        "hoyo_cli.commands.init.open_store",
+        side_effect=[PlaintextStore(secrets), store],
+    ):
         run_init(
-            config, secrets, FakeIO(backend="keyring"), FakeBrowser(), FakeDiscovery()
+            config,
+            secrets,
+            FakeIO(backend="keyring", action="Credential storage"),
+            FakeBrowser(),
+            FakeDiscovery(),
         )
     assert load_config(config).accounts["main"].credential_backend == "keyring"
     assert secrets.read_bytes() == original
@@ -1469,7 +1482,7 @@ def test_backend_change_needs_separate_sensitive_consent(tmp_path: Path) -> None
             run_init(
                 config,
                 secrets,
-                DeclineIO(backend="keyring"),
+                DeclineIO(backend="keyring", action="Credential storage"),
                 FakeBrowser(),
                 FakeDiscovery(),
             )
@@ -1488,7 +1501,7 @@ def test_sensitive_consent_defaults_to_no_in_real_command(
         secrets.read_bytes() if secrets.exists() else None,
     )
     answers = (
-        "1\n\n"
+        "1\n4\n\n"
         if action == "overwrite"
         else ("main\nn\nltuid=123; ltoken=test-secret-123\n\n\n\n\n2\n\n")
     )
@@ -1508,3 +1521,438 @@ def test_sensitive_consent_defaults_to_no_in_real_command(
         config.read_bytes() if config.exists() else None,
         secrets.read_bytes() if secrets.exists() else None,
     ) == before
+
+
+class SettingsIO(FakeIO):
+    def __init__(self, *, action: str, change_game: str = "", cancel: str = "") -> None:
+        super().__init__(action=action, cancel=cancel)
+        self.change_game = change_game
+
+    def choose(self, prompt: str, choices: Sequence[str]) -> str:
+        if prompt == "Game settings for hsr":
+            return self.change_game or choices[0]
+        if prompt == "Default account":
+            return "alt"
+        return super().choose(prompt, choices)
+
+    def confirm(self, prompt: str) -> bool:
+        if prompt.startswith("Replace existing account"):
+            raise AssertionError("Settings must not request credential replacement")
+        if prompt == "Keep the current game display order?":
+            return False
+        return super().confirm(prompt)
+
+
+@pytest.mark.parametrize(
+    "action", ["Game order", "Default account", "Games and characters"]
+)
+def test_local_settings_never_access_credentials_browser_or_hoyolab(
+    tmp_path: Path, action: str
+) -> None:
+    config, secrets = tmp_path / "config.toml", tmp_path / "credentials.toml"
+    run_init(config, secrets, FakeIO(), FakeBrowser(), FakeDiscovery())
+    run_init(config, secrets, FakeIO(name="alt"), FakeBrowser(), FakeDiscovery())
+    saved = load_config(config)
+    save_account(
+        config,
+        "main",
+        saved.accounts["main"],
+        make_default=True,
+        game_order=("zzz", "hsr"),
+    )
+    config.write_text(
+        "# Keep settings comment\ncustom = 'keep'\n" + config.read_text(),
+        encoding="utf-8",
+    )
+    original = load_config(config)
+    before_secrets = secrets.read_bytes()
+    browser, discovery = FakeBrowser(), FakeDiscovery()
+    io = SettingsIO(action=action, change_game="Disable this game")
+    with (
+        patch(
+            "hoyo_cli.commands.init.open_store",
+            side_effect=BackendUnavailable("Unavailable"),
+        ) as store,
+        patch.object(browser, "list_sessions") as sources,
+        patch.object(browser, "import_session") as imported,
+        patch.object(discovery, "discover") as discover,
+    ):
+        run_init(config, secrets, io, browser, discovery)
+    store.assert_not_called()
+    sources.assert_not_called()
+    imported.assert_not_called()
+    discover.assert_not_called()
+    updated = load_config(config)
+    if action == "Game order":
+        assert updated.game_order == GAME_IDS
+    elif action == "Default account":
+        assert updated.default_account == "alt"
+    else:
+        assert updated.accounts["main"].games["hsr"] == GameSelection(False, 222222222)
+    assert updated.accounts["alt"] == original.accounts["alt"]
+    assert "# Keep settings comment" in config.read_text()
+    assert "custom = 'keep'" in config.read_text()
+    if action != "Default account":
+        assert updated.default_account == original.default_account == "main"
+    if action != "Game order":
+        assert updated.game_order == original.game_order == ("zzz", "hsr")
+    assert secrets.read_bytes() == before_secrets
+    assert not any("Replace" in prompt or "Import" in prompt for prompt in io.prompts)
+
+
+@pytest.mark.parametrize("initially_enabled", [False, True])
+def test_character_changes_verify_saved_session_without_resaving_secrets(
+    tmp_path: Path, initially_enabled: bool
+) -> None:
+    config, secrets = tmp_path / "config.toml", tmp_path / "credentials.toml"
+    run_init(config, secrets, FakeIO(), FakeBrowser(), FakeDiscovery())
+    original = load_config(config)
+    games = dict(original.accounts["main"].games)
+    games["hsr"] = GameSelection(initially_enabled, 222222222)
+    save_account(
+        config,
+        "main",
+        AccountConfig("plaintext", games),
+        make_default=False,
+        game_order=original.game_order,
+    )
+    before_secrets = secrets.read_bytes()
+    store, browser, discovery = PlaintextStore(secrets), FakeBrowser(), FakeDiscovery()
+    character = CharacterRef("hsr", 999999999, "test", "New Trailblazer")
+    io = SettingsIO(
+        action="Games and characters", change_game="Choose linked character"
+    )
+    with (
+        patch("hoyo_cli.commands.init.open_store", return_value=store),
+        patch.object(store, "get", wraps=store.get) as get,
+        patch.object(store, "put") as put,
+        patch.object(store, "checkpoint") as checkpoint,
+        patch.object(
+            discovery, "discover", return_value={"hsr": (character,)}
+        ) as discover,
+    ):
+        run_init(config, secrets, io, browser, discovery)
+    get.assert_called_once_with("main")
+    discover.assert_called_once_with(
+        parse_cookie_header("ltuid=123; ltoken=test-secret-123")
+    )
+    put.assert_not_called()
+    checkpoint.assert_not_called()
+    assert browser.listed == 0 and browser.imported == []
+    updated = load_config(config)
+    assert updated.accounts["main"].games["hsr"] == GameSelection(True, character.uid)
+    assert updated.accounts["main"].games["genshin"] == games["genshin"]
+    assert updated.accounts["main"].games["zzz"] == games["zzz"]
+    assert updated.default_account == original.default_account
+    assert updated.game_order == original.game_order
+    assert secrets.read_bytes() == before_secrets
+
+
+@pytest.mark.parametrize(
+    "failure", ["missing", "unavailable", "expired", "unlinked", "forged", "cancel"]
+)
+def test_failed_or_cancelled_character_change_preserves_config_and_secrets(
+    tmp_path: Path, failure: str
+) -> None:
+    config, secrets = tmp_path / "config.toml", tmp_path / "credentials.toml"
+    run_init(config, secrets, FakeIO(), FakeBrowser(), FakeDiscovery())
+    original = config.read_bytes(), secrets.read_bytes()
+    discovery, store = FakeDiscovery(), PlaintextStore(secrets)
+
+    class InvalidSettingsIO(SettingsIO):
+        def choose(self, prompt: str, choices: Sequence[str]) -> str:
+            if failure == "cancel" and prompt.startswith("Save"):
+                return "Cancel (no changes)"
+            if failure == "forged" and prompt == "Character for hsr":
+                return "Retained UID 222222222"
+            return super().choose(prompt, choices)
+
+    io = InvalidSettingsIO(
+        action="Games and characters", change_game="Choose linked character"
+    )
+    with (
+        patch("hoyo_cli.commands.init.open_store", return_value=store),
+        patch.object(store, "get", wraps=store.get) as get,
+        patch.object(store, "put") as put,
+        patch.object(discovery, "discover", wraps=discovery.discover) as discover,
+    ):
+        if failure == "missing":
+            get.return_value, get.side_effect = None, None
+        elif failure == "unavailable":
+            get.side_effect = BackendUnavailable("Unavailable")
+        elif failure == "expired":
+            discover.side_effect = AuthenticationError("Expired")
+        elif failure == "unlinked":
+            discover.return_value = {}
+        with pytest.raises(click.Abort if failure == "cancel" else AppError):
+            run_init(config, secrets, io, FakeBrowser(), discovery)
+    put.assert_not_called()
+    if failure in ("missing", "unavailable"):
+        discover.assert_not_called()
+    assert (config.read_bytes(), secrets.read_bytes()) == original
+
+
+@pytest.mark.parametrize(
+    "action", ["Game order", "Default account", "Games and characters"]
+)
+def test_local_settings_cancel_and_config_failure_do_not_touch_secret_store(
+    tmp_path: Path, action: str
+) -> None:
+    config, secrets = tmp_path / "config.toml", tmp_path / "credentials.toml"
+    run_init(config, secrets, FakeIO(), FakeBrowser(), FakeDiscovery())
+    run_init(config, secrets, FakeIO(name="alt"), FakeBrowser(), FakeDiscovery())
+    before = config.read_bytes(), secrets.read_bytes()
+    with patch("hoyo_cli.commands.init.open_store") as store:
+        with pytest.raises(click.Abort):
+            run_init(
+                config,
+                secrets,
+                SettingsIO(
+                    action=action, change_game="Disable this game", cancel="Save"
+                ),
+                FakeBrowser(),
+                FakeDiscovery(),
+            )
+        with patch(
+            "hoyo_cli.commands.init.commit_config",
+            side_effect=AppError("Write failure"),
+        ):
+            with pytest.raises(AppError, match="Write failure"):
+                run_init(
+                    config,
+                    secrets,
+                    SettingsIO(action=action, change_game="Disable this game"),
+                    FakeBrowser(),
+                    FakeDiscovery(),
+                )
+    store.assert_not_called()
+    assert (config.read_bytes(), secrets.read_bytes()) == before
+
+
+def test_multiple_character_changes_share_one_discovery(
+    tmp_path: Path,
+) -> None:
+    config, secrets = tmp_path / "config.toml", tmp_path / "credentials.toml"
+    run_init(config, secrets, FakeIO(), FakeBrowser(), FakeDiscovery())
+    before_secrets = secrets.read_bytes()
+    discovery, store = FakeDiscovery(), PlaintextStore(secrets)
+    linked = {
+        game: (CharacterRef(game, index + 900000001, "test", f"New {game}"),)
+        for index, game in enumerate(GAME_IDS)
+    }
+
+    class ChangeAllIO(SettingsIO):
+        def choose(self, prompt: str, choices: Sequence[str]) -> str:
+            if prompt.startswith("Game settings"):
+                return "Choose linked character"
+            return super().choose(prompt, choices)
+
+    with (
+        patch("hoyo_cli.commands.init.open_store", return_value=store),
+        patch.object(store, "get", wraps=store.get) as get,
+        patch.object(store, "put") as put,
+        patch.object(discovery, "discover", return_value=linked) as discover,
+    ):
+        run_init(
+            config,
+            secrets,
+            ChangeAllIO(action="Games and characters"),
+            FakeBrowser(),
+            discovery,
+        )
+    get.assert_called_once_with("main")
+    discover.assert_called_once()
+    put.assert_not_called()
+    updated = load_config(config).accounts["main"]
+    assert {game: selection.uid for game, selection in updated.games.items()} == {
+        game: characters[0].uid for game, characters in linked.items()
+    }
+    assert secrets.read_bytes() == before_secrets
+
+
+def test_disabling_last_enabled_game_is_rejected_locally(tmp_path: Path) -> None:
+    config, secrets = tmp_path / "config.toml", tmp_path / "credentials.toml"
+    run_init(config, secrets, FakeIO(), FakeBrowser(), FakeDiscovery())
+    saved = load_config(config)
+    save_account(
+        config,
+        "main",
+        AccountConfig("plaintext", {"hsr": GameSelection(True, 222222222)}),
+        make_default=True,
+        game_order=saved.game_order,
+    )
+    before = config.read_bytes(), secrets.read_bytes()
+    with patch("hoyo_cli.commands.init.open_store") as store:
+        with pytest.raises(AppError, match="at least one enabled game"):
+            run_init(
+                config,
+                secrets,
+                SettingsIO(
+                    action="Games and characters", change_game="Disable this game"
+                ),
+                FakeBrowser(),
+                FakeDiscovery(),
+            )
+    store.assert_not_called()
+    assert (config.read_bytes(), secrets.read_bytes()) == before
+
+
+@pytest.mark.parametrize("outcome", ["cancel", "write-failure", "interrupt", "save"])
+def test_explicit_storage_change_has_consent_review_and_transactional_save(
+    tmp_path: Path, outcome: str, capsys: pytest.CaptureFixture[str]
+) -> None:
+    config, secrets = tmp_path / "config.toml", tmp_path / "credentials.toml"
+    run_init(config, secrets, FakeIO(), FakeBrowser(), FakeDiscovery())
+    before = config.read_bytes(), secrets.read_bytes()
+    source, target = PlaintextStore(secrets), KeyringStore(MemoryKeyring())
+    target.put("main", parse_cookie_header("ltuid=456; ltoken=old-target-secret"))
+    old_target = target.get("main")
+    browser, discovery = FakeBrowser(), FakeDiscovery()
+    capsys.readouterr()
+
+    class StorageIO(FakeIO):
+        def choose(self, prompt: str, choices: Sequence[str]) -> str:
+            if prompt.startswith("Save"):
+                output = capsys.readouterr().out
+                assert (
+                    "Review changes" in output
+                    and "Credential storage: keyring" in output
+                )
+                assert target.get("main") == old_target
+                if outcome == "cancel":
+                    return "Cancel (no changes)"
+            return super().choose(prompt, choices)
+
+    io = StorageIO(action="Credential storage", backend="keyring")
+    with (
+        patch("hoyo_cli.commands.init.open_store", side_effect=[source, target]),
+        patch.object(browser, "list_sessions") as listed,
+        patch.object(discovery, "discover") as discover,
+        patch("hoyo_cli.commands.init.commit_config", wraps=commit_config) as commit,
+    ):
+        if outcome == "write-failure":
+            commit.side_effect = AppError("Write failure")
+        elif outcome == "interrupt":
+            commit.side_effect = KeyboardInterrupt()
+        if outcome == "save":
+            run_init(config, secrets, io, browser, discovery)
+        else:
+            with pytest.raises(
+                click.Abort
+                if outcome == "cancel"
+                else KeyboardInterrupt
+                if outcome == "interrupt"
+                else AppError
+            ):
+                run_init(config, secrets, io, browser, discovery)
+    listed.assert_not_called()
+    discover.assert_not_called()
+    assert "Change this account's credential backend?" in io.prompts
+    assert "Replace existing stored credentials in the selected backend?" in io.prompts
+    assert secrets.read_bytes() == before[1]
+    if outcome == "save":
+        assert target.get("main") == source.get("main")
+        assert load_config(config).accounts["main"].credential_backend == "keyring"
+    else:
+        assert target.get("main") == old_target
+        assert config.read_bytes() == before[0]
+
+
+@pytest.mark.parametrize(
+    "stage", ["Account settings", "Default account", "Game settings for hsr"]
+)
+def test_forged_existing_settings_selection_never_persists(
+    tmp_path: Path, stage: str
+) -> None:
+    config, secrets = tmp_path / "config.toml", tmp_path / "credentials.toml"
+    run_init(config, secrets, FakeIO(), FakeBrowser(), FakeDiscovery())
+    before = config.read_bytes(), secrets.read_bytes()
+
+    class ForgedIO(SettingsIO):
+        def choose(self, prompt: str, choices: Sequence[str]) -> str:
+            return (
+                "not-a-choice" if prompt == stage else super().choose(prompt, choices)
+            )
+
+    action = "Default account" if stage == "Default account" else "Games and characters"
+    with patch("hoyo_cli.commands.init.open_store") as store:
+        with pytest.raises(AppError, match="Invalid setup selection"):
+            run_init(
+                config, secrets, ForgedIO(action=action), FakeBrowser(), FakeDiscovery()
+            )
+    store.assert_not_called()
+    assert (config.read_bytes(), secrets.read_bytes()) == before
+
+
+@pytest.mark.parametrize("width", [48, 70, 100])
+@pytest.mark.parametrize(
+    ("action", "answers"),
+    [
+        ("Game order", "2\nn\n3\n2\n1\n1\n"),
+        ("Default account", "3\n2\n1\n"),
+        ("Games and characters", "1\n1\n2\n1\n1\n"),
+    ],
+)
+def test_cli_local_settings_work_with_unavailable_keyring_and_no_browser_reads(
+    tmp_path: Path,
+    runner: CliRunner,
+    width: int,
+    action: str,
+    answers: str,
+) -> None:
+    config, secrets = tmp_path / "config.toml", tmp_path / "credentials.toml"
+    run_init(config, secrets, FakeIO(), FakeBrowser(), FakeDiscovery())
+    run_init(config, secrets, FakeIO(name="alt"), FakeBrowser(), FakeDiscovery())
+    saved = load_config(config)
+    save_account(
+        config,
+        "main",
+        AccountConfig("keyring", saved.accounts["main"].games),
+        make_default=True,
+        game_order=GAME_IDS,
+    )
+    before_secrets = secrets.read_bytes()
+    browser, discovery = FakeBrowser(), FakeDiscovery()
+
+    def console(**kwargs: object) -> Console:
+        return Console(width=width, color_system=None)
+
+    with (
+        patch("hoyo_cli.commands.init.config_path", return_value=config),
+        patch("hoyo_cli.commands.init.credentials_path", return_value=secrets),
+        patch("hoyo_cli.commands.init.SystemBrowserImporter", return_value=browser),
+        patch("hoyo_cli.commands.init.HoYoLABDiscovery", return_value=discovery),
+        patch(
+            "hoyo_cli.commands.init.open_store",
+            side_effect=BackendUnavailable("Unavailable"),
+        ) as store,
+        patch.object(discovery, "discover") as discover,
+        patch(
+            "hoyo_cli.render.setup.make_console",
+            side_effect=console,
+        ),
+    ):
+        result = runner.invoke(
+            main,
+            ["init", "--account", "main", "--no-color"],
+            input=answers,
+            terminal_width=width,
+        )
+    assert result.exit_code == 0, result.output
+    assert (
+        "Review changes" in result.output and "Configured account main" in result.output
+    )
+    assert "test-secret-123" not in result.output and "\x1b" not in result.output
+    assert "Replace existing account credentials" not in result.output
+    store.assert_not_called()
+    discover.assert_not_called()
+    assert browser.listed == 0 and browser.imported == []
+    updated = load_config(config)
+    if action == "Game order":
+        assert updated.game_order == ("zzz", "hsr", "genshin")
+    elif action == "Default account":
+        assert updated.default_account == "alt"
+    else:
+        assert updated.accounts["main"].games["hsr"] == GameSelection(False, 222222222)
+    assert updated.accounts["main"].credential_backend == "keyring"
+    assert secrets.read_bytes() == before_secrets

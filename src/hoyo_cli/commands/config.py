@@ -36,8 +36,15 @@ def show_config(config: AppConfig, path: Path) -> str:
             if selection is not None and selection.enabled:
                 lines.append(f"  {game}: enabled, UID {selection.uid}")
                 any_enabled = True
+            elif selection is not None:
+                lines.append(f"  {game}: disabled, UID {selection.uid}")
+            else:
+                lines.append(f"  {game}: not configured")
         if not any_enabled:
             lines.append("  No enabled games")
+    lines.extend(
+        ["", "Run: hoyo init to change settings or update your HoYoLAB session."]
+    )
     return "\n".join(lines)
 
 

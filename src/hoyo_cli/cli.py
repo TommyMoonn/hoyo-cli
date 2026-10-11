@@ -75,7 +75,16 @@ def _resolve_options(
 def main(
     ctx: click.Context, account: str | None, detailed: bool, no_color: bool
 ) -> None:
-    """HoYoLAB status for Genshin Impact, Honkai: Star Rail, and Zenless Zone Zero."""
+    """HoYoLAB status for Genshin Impact, Honkai: Star Rail, and Zenless Zone Zero.
+
+    \b
+    Common commands:
+      hoyo init          Set up an account or change settings.
+      hoyo               Show all enabled games.
+      hoyo genshin       Show one game's status.
+      hoyo check-in zzz  Claim daily rewards for one game.
+      hoyo config        Inspect selections, including disabled games.
+    """
     ctx.obj = CommandOptions(account=account, detailed=detailed, no_color=no_color)
     if ctx.invoked_subcommand is None:
         ctx.invoke(
@@ -154,7 +163,19 @@ def check_in_command(
 @_common_options()
 @click.pass_context
 def init_command(ctx: click.Context, account: str | None, no_color: bool) -> None:
-    """Set up or reconfigure an account interactively."""
+    """Set up or reconfigure an account interactively.
+
+    \b
+    Existing-account actions:
+      Games and characters  Keep or disable games locally; verify new UIDs.
+      Game order            Change display order without reading secrets.
+      Default account       Choose an account without reading secrets.
+      Update HoYoLAB session  Explicitly replace imported or pasted cookies.
+      Credential storage    Explicitly copy the saved session to a backend.
+
+    Character changes use the saved session for discovery without re-saving it.
+    All changes are reviewed before Save; Cancel leaves files unchanged.
+    """
     init.configure_account(
         options=_resolve_options(ctx, account=account, no_color=no_color)
     )
@@ -167,7 +188,11 @@ def init_command(ctx: click.Context, account: str | None, no_color: bool) -> Non
 def config_command(
     ctx: click.Context, edit: bool, account: str | None, no_color: bool
 ) -> None:
-    """Inspect non-secret configuration, or open it with --edit."""
+    """Inspect non-secret configuration, or open it with --edit.
+
+    Shows enabled, disabled, and unconfigured games without reading secrets.
+    Run hoyo init to change settings, characters, session, or credential storage.
+    """
     config.run_config(
         options=_resolve_options(ctx, account=account, no_color=no_color), edit=edit
     )
