@@ -4,6 +4,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Literal, cast
+from unicodedata import category
 
 from tomlkit.toml_document import TOMLDocument
 
@@ -36,6 +37,7 @@ class AppConfig:
     game_order: tuple[GameId, ...]
     display_color: DisplayColor
     accounts: Mapping[str, AccountConfig]
+    editor_command: tuple[str, ...] | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "accounts", MappingProxyType(dict(self.accounts)))
@@ -80,6 +82,23 @@ def _game_order(value: object) -> tuple[GameId, ...]:
     if len(set(games)) != len(games):
         raise _invalid("game_order", "must not contain duplicate games")
     return games
+
+
+def validate_editor_command(value: object) -> tuple[str, ...]:
+    """Validate argv without including user-supplied values in diagnostics."""
+    if not isinstance(value, (list, tuple)) or not value:
+        raise _invalid("editor.command", "must be a nonempty argument array")
+    entries = cast(list[object] | tuple[object, ...], value)
+    if any(
+        not isinstance(entry, str)
+        or not entry
+        or any(category(character) == "Cc" for character in entry)
+        for entry in entries
+    ):
+        raise _invalid(
+            "editor.command", "must contain nonempty strings without control characters"
+        )
+    return tuple(cast(str, entry) for entry in entries)
 
 
 def _parse_account(value: object, path: str) -> AccountConfig:
@@ -127,12 +146,16 @@ def parse_config(document: TOMLDocument) -> AppConfig:
         _account_name(name, "accounts"): _parse_account(value, f"accounts.{name}")
         for name, value in _table(fields.get("accounts"), "accounts").items()
     }
+    editor = _table(fields["editor"], "editor") if "editor" in fields else {}
     config = AppConfig(
         version=version,
         default_account=default,
         game_order=order,
         display_color=display_color,
         accounts=accounts,
+        editor_command=(
+            validate_editor_command(editor["command"]) if "command" in editor else None
+        ),
     )
     resolve_account(config, None)
     return config

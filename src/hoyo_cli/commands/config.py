@@ -1,8 +1,6 @@
 """Non-secret config inspection and explicitly selected editor launching."""
 
-import ctypes
 import os
-import shlex
 import subprocess
 from pathlib import Path
 
@@ -13,7 +11,15 @@ from hoyo_cli.commands.init import (
     ClickSetupIO,
     SetupIO,
     choose_setup_option,
+    select_editor,
     select_game_order,
+)
+from hoyo_cli.config.editor import (
+    EDITOR_HINT,
+    ResolvedEditor,
+    describe_editor,
+    editor_available,
+    resolve_editor,
 )
 from hoyo_cli.config.models import AppConfig, ordered_games, resolve_account
 from hoyo_cli.config.paths import config_path
@@ -21,9 +27,11 @@ from hoyo_cli.config.repository import (
     commit_config,
     load_config,
     load_config_snapshot,
+    prepare_editor,
     prepare_game_order,
 )
 from hoyo_cli.errors import AppError, ConfigError
+from hoyo_cli.render.setup import SetupPresenter
 
 
 def show_config(config: AppConfig, path: Path) -> str:
@@ -32,6 +40,9 @@ def show_config(config: AppConfig, path: Path) -> str:
         f"Default account: {config.default_account}",
         f"Game order: {', '.join(config.game_order) or '(canonical fallback)'}",
         f"Display color: {config.display_color}",
+        "Editor: " + describe_editor(config.editor_command),
+        "Editor executable: "
+        + ("available" if editor_available(config.editor_command) else "unavailable"),
     ]
     for name, account in config.accounts.items():
         lines.extend(
@@ -60,6 +71,7 @@ def show_config(config: AppConfig, path: Path) -> str:
             "Update account or session: hoyo account edit NAME",
             "Switch default: hoyo account use NAME",
             "Change game order: hoyo config order",
+            "Change editor: hoyo config editor",
         ]
     )
     return "\n".join(lines)
@@ -93,43 +105,52 @@ def configure_order() -> None:
         raise
 
 
-def _editor_arguments(editor: str) -> list[str]:
-    if "\0" in editor:
-        raise ValueError("Editor command contains a null character.")
-    if os.name != "nt":
-        return shlex.split(editor)
-    # Use Windows' own argv parser so quoted paths and backslashes retain meaning.
-    shell32 = ctypes.WinDLL("shell32", use_last_error=True)
-    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-    parse = shell32.CommandLineToArgvW
-    parse.argtypes = [ctypes.c_wchar_p, ctypes.POINTER(ctypes.c_int)]
-    parse.restype = ctypes.POINTER(ctypes.c_wchar_p)
-    release = kernel32.LocalFree
-    release.argtypes = [ctypes.c_void_p]
-    release.restype = ctypes.c_void_p
-    count = ctypes.c_int()
-    arguments = parse(editor.lstrip(), ctypes.byref(count))
-    if not arguments:
-        raise OSError("Unable to parse editor command.")
-    try:
-        return [str(arguments[index]) for index in range(count.value)]
-    finally:
-        release(arguments)
-
-
-def edit_config(path: Path, editor: str | None) -> int:
-    if editor is None or not editor.strip():
+def run_editor(path: Path, io: SetupIO, *, no_color: bool = False) -> None:
+    config, original = load_config_snapshot(path)
+    presenter = SetupPresenter(no_color=no_color, configured_color=config.display_color)
+    command = select_editor(io, presenter, config.editor_command)
+    prepared = prepare_editor(path, command)
+    if prepared.original != original:
         raise ConfigError(
-            f"No editor configured. Set VISUAL or EDITOR.\nConfig: {path}"
+            "Configuration changed during editor selection.",
+            hint="Retry hoyo config editor.",
         )
+    presenter.message("Review editor: " + describe_editor(command))
+    if (
+        choose_setup_option(
+            io, "Save editor preference?", ("Save", "Cancel (no changes)")
+        )
+        != "Save"
+    ):
+        raise click.Abort()
+    if prepared.content.encode("utf-8") != original:
+        commit_config(prepared)
+    presenter.message("Editor: " + describe_editor(command))
+
+
+def configure_editor(*, no_color: bool = False) -> None:
     try:
-        arguments = _editor_arguments(editor)
-        if not arguments or not arguments[0]:
-            raise ValueError("Editor executable is empty.")
-        result = subprocess.run([*arguments, str(path)], check=False, shell=False)
+        run_editor(config_path(), ClickSetupIO(), no_color=no_color)
+    except (click.Abort, KeyboardInterrupt):
+        click.echo("Editor cancelled; no changes saved.", color=False)
+        raise
+
+
+def edit_config(path: Path, editor: ResolvedEditor) -> int:
+    try:
+        arguments = [*editor.arguments, str(path)]
+        if editor.node_cli:
+            environment = dict(os.environ)
+            environment["ELECTRON_RUN_AS_NODE"] = "1"
+            environment.pop("VSCODE_DEV", None)
+            result = subprocess.run(
+                arguments, check=False, shell=False, env=environment
+            )
+        else:
+            result = subprocess.run(arguments, check=False, shell=False)
     except (OSError, ValueError):
         raise ConfigError(
-            f"Unable to launch configured editor. Set VISUAL or EDITOR.\nConfig: {path}"
+            f"Unable to launch configured editor.\nConfig: {path}", hint=EDITOR_HINT
         ) from None
     return result.returncode
 
@@ -139,16 +160,41 @@ def run_config(*, options: CommandOptions, edit: bool) -> None:
     config = load_config(path)
     resolve_account(config, options.account)
     if edit:
-        editor = next(
-            (
-                value
-                for name in ("VISUAL", "EDITOR")
-                if (value := os.environ.get(name)) and value.strip()
-            ),
-            None,
-        )
+        try:
+            editor = resolve_editor(config.editor_command)
+        except (ConfigError, OSError) as error:
+            message = (
+                error.message
+                if isinstance(error, ConfigError)
+                else "Unable to resolve editor."
+            )
+            raise ConfigError(f"{message}\nConfig: {path}", hint=EDITOR_HINT) from None
         exit_code = edit_config(path, editor)
         if exit_code != 0:
-            raise AppError(f"Editor exited with status {exit_code}.\nConfig: {path}")
+            raise AppError(
+                f"Editor exited with status {exit_code}.\nConfig: {path}",
+                hint=(
+                    "Edits were preserved. Review the config or choose "
+                    "hoyo config editor."
+                ),
+            )
+        if editor.waits:
+            try:
+                load_config(path)
+            except ConfigError as error:
+                raise ConfigError(
+                    error.message,
+                    hint=(
+                        "Your edits were preserved. Correct the TOML/schema "
+                        "in this file, then run hoyo config."
+                    ),
+                ) from None
+            click.echo("Configuration validated after editor closed.", color=False)
+        else:
+            click.echo(
+                "Editor launched; file-close completion is unconfirmed. "
+                "After saving, run hoyo config to validate your edits.",
+                color=False,
+            )
     else:
         click.echo(show_config(config, path), color=False)

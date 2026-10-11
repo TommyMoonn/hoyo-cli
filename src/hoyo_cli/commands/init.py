@@ -22,12 +22,18 @@ from hoyo_cli.auth.credentials import (
     parse_cookie_header,
 )
 from hoyo_cli.commands import CommandOptions
+from hoyo_cli.config.editor import (
+    describe_editor,
+    detected_editors,
+    resolve_editor_command,
+)
 from hoyo_cli.config.models import (
     AccountConfig,
     AppConfig,
     CredentialBackend,
     GameSelection,
     resolve_account,
+    validate_editor_command,
 )
 from hoyo_cli.config.paths import config_path, credentials_path
 from hoyo_cli.config.repository import (
@@ -329,6 +335,53 @@ def select_game_order(io: SetupIO, config: AppConfig | None) -> tuple[GameId, ..
         order.append(game)
         remaining.remove(game)
     return tuple(order)
+
+
+def select_editor(
+    io: SetupIO, presenter: SetupPresenter, current: tuple[str, ...] | None
+) -> tuple[str, ...] | None:
+    """Shared global picker; detection and review never launch an editor."""
+    presets = detected_editors()
+    presenter.message("Current editor: " + describe_editor(current))
+    presenter.message(
+        "Only detected presets are listed. Add an editor to PATH or use its full path."
+    )
+    while True:
+        selected = choose_setup_option(
+            io,
+            "Editor",
+            (
+                "Keep current",
+                *presets,
+                "Use VISUAL/EDITOR",
+                "Custom executable/arguments",
+                "Cancel (no changes)",
+            ),
+        )
+        if selected == "Cancel (no changes)":
+            raise click.Abort()
+        if selected == "Keep current":
+            return current
+        if selected == "Use VISUAL/EDITOR":
+            return None
+        try:
+            if selected == "Custom executable/arguments":
+                executable = choose_setup_option(
+                    io, "Editor executable (full path or PATH name; no quotes)", ()
+                )
+                arguments = [executable]
+                while io.confirm("Add an editor argument?"):
+                    arguments.append(choose_setup_option(io, "Editor argument", ()))
+                command = validate_editor_command(arguments)
+            else:
+                command = presets[selected]
+            resolve_editor_command(command)
+        except ConfigError as error:
+            presenter.message(error.message)
+            presenter.message("Choose an available executable; no changes saved.")
+            continue
+        presenter.message("Selected editor: " + describe_editor(command))
+        return command
 
 
 def _character(
@@ -687,39 +740,48 @@ def _run_setup(
             no_color=no_color,
         )
     )
-    prepared = prepare_account(
-        config_file,
-        name,
-        changes.account,
-        make_default=config is None,
-        game_order=changes.initial_order,
-    )
     recovery = (
         "Retry hoyo init." if mode == "first" else f"Retry hoyo account {mode} NAME."
     )
-    prepared = replace(prepared, conflict_hint=recovery)
-    if prepared.original != original:
-        raise ConfigError("Configuration changed during setup.", hint=recovery)
-    presenter.review(
-        name=name,
-        games=changes.account.games,
-        characters=changes.characters,
-        backend=changes.account.credential_backend,
-        default_account=config.default_account if config else name,
-        order=config.game_order if config else changes.initial_order or GAME_IDS,
-        staged=not existing,
-    )
-    if (
-        choose_setup_option(
+    editor = config.editor_command if config else None
+    while True:
+        prepared = prepare_account(
+            config_file,
+            name,
+            changes.account,
+            make_default=config is None,
+            game_order=changes.initial_order,
+            editor_command=editor,
+        )
+        prepared = replace(prepared, conflict_hint=recovery)
+        if prepared.original != original:
+            raise ConfigError("Configuration changed during setup.", hint=recovery)
+        presenter.review(
+            name=name,
+            games=changes.account.games,
+            characters=changes.characters,
+            backend=changes.account.credential_backend,
+            default_account=config.default_account if config else name,
+            order=config.game_order if config else changes.initial_order or GAME_IDS,
+            staged=not existing,
+            editor=describe_editor(editor) if mode == "first" else None,
+        )
+        action = choose_setup_option(
             io,
             "Save account configuration and credentials?"
             if changes.secret_update
             else "Save account settings?",
-            ("Save", "Cancel (no changes)"),
+            (
+                "Save",
+                "Cancel (no changes)",
+                *(("Editor preference",) if mode == "first" else ()),
+            ),
         )
-        != "Save"
-    ):
-        raise click.Abort()
+        if action == "Save":
+            break
+        if action == "Cancel (no changes)":
+            raise click.Abort()
+        editor = select_editor(io, presenter, editor)
     if changes.secret_update is None:
         commit_config(prepared)
         return name

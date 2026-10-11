@@ -16,6 +16,7 @@ from tomlkit.toml_document import TOMLDocument
 from hoyo_cli.cli import main
 from hoyo_cli.commands.config import edit_config, show_config
 from hoyo_cli.config import repository
+from hoyo_cli.config.editor import ResolvedEditor, parse_editor_arguments
 from hoyo_cli.config.models import (
     AccountConfig,
     GameSelection,
@@ -32,6 +33,10 @@ from hoyo_cli.config.repository import (
 )
 from hoyo_cli.errors import ConfigError
 from hoyo_cli.models.common import GameId
+
+
+def _fake_executable(name: str) -> str:
+    return name
 
 
 def test_save_refuses_detected_symlink_before_io(tmp_path: Path) -> None:
@@ -510,7 +515,10 @@ def test_config_edit_invokes_selected_editor(tmp_path: Path) -> None:
     with patch(
         "hoyo_cli.commands.config.subprocess.run", return_value=CompletedProcess([], 0)
     ) as launch:
-        assert edit_config(path, 'fake-editor --wait --title "two words"') == 0
+        editor = ResolvedEditor(
+            parse_editor_arguments('fake-editor --wait --title "two words"'), False
+        )
+        assert edit_config(path, editor) == 0
     launch.assert_called_once_with(
         ["fake-editor", "--wait", "--title", "two words", str(path)],
         check=False,
@@ -518,13 +526,9 @@ def test_config_edit_invokes_selected_editor(tmp_path: Path) -> None:
     )
 
 
-def test_config_edit_without_editor_reports_path(tmp_path: Path) -> None:
-    path = tmp_path / "config.toml"
-    with pytest.raises(ConfigError) as caught:
-        edit_config(path, None)
-    assert str(path) in str(caught.value)
-    assert "VISUAL" in str(caught.value)
-    assert "EDITOR" in str(caught.value)
+def test_empty_editor_arguments_are_classified() -> None:
+    with pytest.raises(ConfigError, match="Invalid editor arguments"):
+        parse_editor_arguments("")
 
 
 def test_editor_launch_error_is_classified(tmp_path: Path) -> None:
@@ -535,7 +539,7 @@ def test_editor_launch_error_is_classified(tmp_path: Path) -> None:
         side_effect=FileNotFoundError("private-marker"),
     ):
         with pytest.raises(ConfigError) as caught:
-            edit_config(path, "missing-editor")
+            edit_config(path, ResolvedEditor(("missing-editor",), False))
     assert str(path) in str(caught.value)
     assert "private-marker" not in str(caught.value)
 
@@ -545,7 +549,12 @@ def test_editor_shell_metacharacters_remain_arguments(tmp_path: Path) -> None:
     with patch(
         "hoyo_cli.commands.config.subprocess.run", return_value=CompletedProcess([], 0)
     ) as launch:
-        edit_config(path, "fake-editor ; other-command")
+        edit_config(
+            path,
+            ResolvedEditor(
+                parse_editor_arguments("fake-editor ; other-command"), False
+            ),
+        )
     assert launch.call_args.args[0] == ["fake-editor", ";", "other-command", str(path)]
     assert launch.call_args.kwargs["shell"] is False
 
@@ -615,6 +624,7 @@ def test_config_cli_editor_precedence(
     monkeypatch.setenv("EDITOR", "secondary-editor")
     with (
         patch("hoyo_cli.commands.config.config_path", return_value=path),
+        patch("shutil.which", side_effect=_fake_executable),
         patch(
             "hoyo_cli.commands.config.subprocess.run",
             return_value=CompletedProcess([], 0),
@@ -756,27 +766,34 @@ def test_windows_editor_quotes_and_backslashes(
     with patch(
         "hoyo_cli.commands.config.subprocess.run", return_value=CompletedProcess([], 0)
     ) as launch:
-        edit_config(path, list2cmdline(arguments))
+        edit_config(
+            path, ResolvedEditor(parse_editor_arguments(list2cmdline(arguments)), False)
+        )
     assert launch.call_args.args[0] == [*arguments, str(path)]
 
 
 def test_posix_editor_quoting_uses_an_argument_vector(tmp_path: Path) -> None:
     path = tmp_path / "config.toml"
     with (
-        patch("hoyo_cli.commands.config.os.name", "posix"),
+        patch("hoyo_cli.config.editor.os.name", "posix"),
         patch(
             "hoyo_cli.commands.config.subprocess.run",
             return_value=CompletedProcess([], 0),
         ) as launch,
     ):
-        edit_config(path, "'editor path' --title='two words'")
+        edit_config(
+            path,
+            ResolvedEditor(
+                parse_editor_arguments("'editor path' --title='two words'"), False
+            ),
+        )
     assert launch.call_args.args[0] == ["editor path", "--title=two words", str(path)]
 
 
 def test_invalid_editor_command_does_not_launch(tmp_path: Path) -> None:
     with patch("hoyo_cli.commands.config.subprocess.run") as launch:
         with pytest.raises(ConfigError):
-            edit_config(tmp_path / "config.toml", "editor\0secret")
+            parse_editor_arguments("editor\0secret")
     launch.assert_not_called()
 
 
@@ -791,6 +808,7 @@ def test_editor_nonzero_exit_is_a_clean_command_failure(
     monkeypatch.setenv("VISUAL", "fake-editor")
     with (
         patch("hoyo_cli.commands.config.config_path", return_value=path),
+        patch("shutil.which", side_effect=_fake_executable),
         patch(
             "hoyo_cli.commands.config.subprocess.run",
             return_value=CompletedProcess([], 9),

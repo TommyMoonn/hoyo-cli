@@ -92,6 +92,7 @@ def main(
       hoyo check-in zzz  Claim daily rewards for one game.
       hoyo config        Inspect selections, including disabled games.
       hoyo config order  Change the global game display order.
+      hoyo config editor Choose the global preferred editor.
       hoyo account       List accounts and mark the saved default.
       hoyo account use NAME  Change the persistent default account.
     """
@@ -233,6 +234,8 @@ def init_command(ctx: click.Context, account: str | None, no_color: bool) -> Non
     Once initialized, show account/config command guidance without changes.
     Use hoyo account add to add an account, hoyo account edit NAME to update
     one, and hoyo config order to change global game order.
+    Choose an optional Editor preference at first-run review, or later with
+    hoyo config editor.
     --account is rejected; use hoyo account edit NAME for existing accounts.
     """
     init.configure_account(
@@ -252,6 +255,9 @@ def config_command(
     Shows enabled, disabled, and unconfigured games without reading secrets.
     Use hoyo config order for global order and hoyo account edit NAME for
     characters, session, or credential storage.
+    Use hoyo config editor to select a saved editor. --edit uses the saved
+    preference, then VISUAL, then EDITOR. Wait-capable GUI presets use --wait; custom
+    commands may require running hoyo config after saving to validate edits.
     """
     if ctx.invoked_subcommand is not None:
         if edit:
@@ -266,3 +272,17 @@ def config_command(
 def config_order_command() -> None:
     """Change only the global game display order, then review and save."""
     config.configure_order()
+
+
+@config_command.command(name="editor")
+@click.option("--no-color", is_flag=True, help="Disable terminal styling.")
+@click.pass_context
+def config_editor_command(ctx: click.Context, no_color: bool) -> None:
+    """Choose the global editor, review and save, or clear it to use VISUAL/EDITOR.
+
+    Only detected presets are listed. Custom executable paths are entered
+    without quotes, and arguments individually. No editor opens during selection.
+    """
+    config.configure_editor(
+        no_color=_resolve_options(ctx, account=None, no_color=no_color).no_color
+    )

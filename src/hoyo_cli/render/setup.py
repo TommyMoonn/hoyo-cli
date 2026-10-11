@@ -57,6 +57,7 @@ class SetupPresenter:
         default_account: str,
         order: tuple[GameId, ...],
         staged: bool = True,
+        editor: str | None = None,
     ) -> None:
         if staged:
             self.step(4, "Review", name)
@@ -80,3 +81,5 @@ class SetupPresenter:
         self.message(f"Credential storage: {backend}")
         self.message(f"Default account: {default_account}")
         self.message("Game order: " + ", ".join(order))
+        if editor is not None:
+            self.message("Editor: " + editor)

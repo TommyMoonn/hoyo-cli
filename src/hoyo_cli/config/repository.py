@@ -18,6 +18,7 @@ from hoyo_cli.config.models import (
     AppConfig,
     parse_config,
     resolve_account,
+    validate_editor_command,
 )
 from hoyo_cli.errors import ConfigError, ErrorCode
 from hoyo_cli.models.common import GAME_IDS, GameId
@@ -160,6 +161,7 @@ def prepare_account(
     *,
     make_default: bool,
     game_order: tuple[GameId, ...] | None = None,
+    editor_command: tuple[str, ...] | None = None,
 ) -> PreparedConfig:
     _reject_symlink(path)
     if path.exists():
@@ -174,6 +176,7 @@ def prepare_account(
             game_order if game_order is not None else GAME_IDS
         )
         document["display"] = tomlkit.table().add("color", "auto")
+        _set_editor(document, editor_command)
 
     if make_default:
         _set_field(document, "default_account", name)
@@ -195,6 +198,32 @@ def prepare_account(
     content = tomlkit.dumps(document)
     _validate(tomlkit.parse(content), path)
     return PreparedConfig(path, content, original)
+
+
+def _set_editor(document: TOMLDocument, command: tuple[str, ...] | None) -> None:
+    if command is not None:
+        _set_field(
+            _ensure_table(document, "editor"),
+            "command",
+            list(validate_editor_command(command)),
+        )
+    elif "editor" in document:
+        editor = _ensure_table(document, "editor")
+        if "command" in editor:
+            del editor["command"]
+
+
+def prepare_editor(path: Path, command: tuple[str, ...] | None) -> PreparedConfig:
+    """Change only the editor command, retaining unknown editor fields and comments."""
+    _reject_symlink(path)
+    document, original = _read_snapshot(path)
+    _validate(document, path)
+    _set_editor(document, command)
+    content = tomlkit.dumps(document)
+    _validate(tomlkit.parse(content), path)
+    return PreparedConfig(
+        path, content, original, conflict_hint="Retry hoyo config editor."
+    )
 
 
 def prepare_game_order(path: Path, order: tuple[GameId, ...]) -> PreparedConfig:
