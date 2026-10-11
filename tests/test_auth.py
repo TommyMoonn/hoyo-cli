@@ -36,7 +36,7 @@ class FakeBrowserAdapter:
         if source_id not in ("chrome", "edge"):
             raise BrowserImportError("Unsupported browser.")
         if self.denied:
-            raise BrowserImportError("Access denied. Paste a Cookie header instead.")
+            raise BrowserImportError("Access denied.")
         return parse_cookie_header("ltuid=123; ltoken=test-secret-123")
 
 
@@ -278,7 +278,7 @@ def test_plaintext_refuses_detected_symlink(tmp_path: Path) -> None:
     assert not path.exists()
 
 
-def test_pasted_cookie_header_accepts_semicolon_pairs() -> None:
+def test_internal_cookie_header_fixture_accepts_semicolon_pairs() -> None:
     credentials = parse_cookie_header(
         "analytics=discard; ltuid=123; ltoken=test-secret-123==; ignored=value"
     )

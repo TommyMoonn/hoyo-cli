@@ -19,8 +19,8 @@ from hoyo_cli.auth.browser_import import (
 from hoyo_cli.auth.credentials import (
     Credentials,
     CredentialStore,
+    manual_credentials,
     open_store,
-    parse_cookie_header,
 )
 from hoyo_cli.commands import CommandOptions
 from hoyo_cli.config.editor import (
@@ -63,6 +63,10 @@ from hoyo_cli.render.progress import OperationProgress
 from hoyo_cli.render.setup import SetupPresenter, character_choice
 
 _Result = TypeVar("_Result")
+_MANUAL_SOURCE = "Enter HoYoLAB cookie values (recommended)"
+_BROWSER_SOURCE = "Import from browser (best effort)"
+_MANUAL_ENTRY = "Enter ltuid_v2 / ltoken_v2 manually"
+_MANUAL_REENTRY = "Enter ltuid_v2 / ltoken_v2 again"
 
 
 class SetupIO(Protocol):
@@ -171,12 +175,13 @@ def _browser_profile(io: SetupIO, browser: BrowserImporter) -> BrowserProfile | 
     sessions = browser.list_sessions()
     choices = [session.browser_label for session in sessions]
     if not sessions:
-        click.echo("No supported browser sources are available. Use manual input.")
+        click.echo(
+            "No supported browser sources are available. "
+            "Enter ltuid_v2 / ltoken_v2 manually."
+        )
         return None
-    selected = choose_setup_option(
-        io, "HoYoLAB session", (*choices, "Paste Cookie header")
-    )
-    if selected == "Paste Cookie header":
+    selected = choose_setup_option(io, "HoYoLAB session", (*choices, _MANUAL_ENTRY))
+    if selected == _MANUAL_ENTRY:
         return None
     session = sessions[choices.index(selected)]
     profiles = browser.list_profiles(session.source_id)
@@ -185,18 +190,26 @@ def _browser_profile(io: SetupIO, browser: BrowserImporter) -> BrowserProfile | 
     if not session.supports_profiles:
         click.echo(
             "Profile selection is unavailable for this source on this platform. "
-            "The reader selects a profile; manual Cookie header input is available.",
+            "The reader selects a profile; manual ltuid_v2 / ltoken_v2 "
+            "entry is available.",
             color=False,
         )
         return profiles[0]
     # Tokens disambiguate equal profile names without displaying private paths.
     profile_choices = [f"{p.label} [{p.source_id}]" for p in profiles]
     selected = choose_setup_option(
-        io, "Browser profile", (*profile_choices, "Paste Cookie header")
+        io, "Browser profile", (*profile_choices, _MANUAL_ENTRY)
     )
-    if selected == "Paste Cookie header":
+    if selected == _MANUAL_ENTRY:
         return None
     return profiles[profile_choices.index(selected)]
+
+
+def _session_source(io: SetupIO) -> bool:
+    return (
+        choose_setup_option(io, "Login source", (_MANUAL_SOURCE, _BROWSER_SOURCE))
+        == _BROWSER_SOURCE
+    )
 
 
 def _session(
@@ -207,7 +220,7 @@ def _session(
     no_color: bool,
     configured_color: str,
 ) -> tuple[Credentials, dict[GameId, tuple[CharacterRef, ...]]]:
-    use_browser = io.confirm("Import a HoYoLAB session from supported browsers?")
+    use_browser = _session_source(io)
     profile: BrowserProfile | None = None
     credentials: Credentials | None = None
     while True:
@@ -226,8 +239,9 @@ def _session(
                     )
                     click.echo("Cookies found. Verifying HoYoLAB session.", color=False)
                 else:
-                    credentials = parse_cookie_header(
-                        io.secret("Full HoYoLAB Cookie header (hidden)")
+                    credentials = manual_credentials(
+                        io.secret("ltuid_v2 (HoYoLAB account ID, hidden)"),
+                        io.secret("ltoken_v2 (session token, hidden)"),
                     )
             discovered = _observed_work(
                 "session_verify",
@@ -246,6 +260,14 @@ def _session(
             if error.code == ErrorCode.UNEXPECTED:
                 raise
             click.echo(format_error(error), err=True, color=False)
+            if error.code in (ErrorCode.AUTH_REJECTED, ErrorCode.API_REJECTED):
+                click.echo(
+                    "The session was not verified. Sign in to HoYoLAB again and "
+                    "re-enter both cookie values, or choose browser import. "
+                    "Some sessions or endpoints may require additional cookies.",
+                    err=True,
+                    color=False,
+                )
         else:
             if any(discovered.values()):
                 return credentials, discovered
@@ -265,16 +287,14 @@ def _session(
         )
         if recovery == "Cancel (no changes)":
             raise click.Abort()
-        if recovery == "Paste Cookie header":
+        if recovery == _MANUAL_ENTRY:
             use_browser, profile, credentials = False, None, None
         if recovery == "Choose another browser/profile":
             profile, credentials = None, None
-        if recovery == "Paste Cookie header again":
+        if recovery == _MANUAL_REENTRY:
             credentials = None
         if recovery == "Change credential source":
-            use_browser = io.confirm(
-                "Import a HoYoLAB session from supported browsers?"
-            )
+            use_browser = _session_source(io)
             profile, credentials = None, None
 
 
@@ -283,15 +303,15 @@ def _session_recovery(io: SetupIO, *, use_browser: bool, has_credentials: bool) 
         retry = (
             "Retry session verification" if has_credentials else "Retry browser import"
         )
-        choices = (retry, "Choose another browser/profile", "Paste Cookie header")
+        choices = (retry, "Choose another browser/profile", _MANUAL_ENTRY)
     elif has_credentials:
         choices = (
             "Retry session verification",
             "Change credential source",
-            "Paste Cookie header again",
+            _MANUAL_REENTRY,
         )
     else:
-        choices = ("Paste Cookie header again", "Change credential source")
+        choices = (_MANUAL_REENTRY, "Change credential source")
     return choose_setup_option(
         io,
         "Browser recovery" if use_browser else "Session recovery",

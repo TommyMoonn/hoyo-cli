@@ -50,7 +50,7 @@ class Credentials:
         fields = _validate_fields(self.fields)
         identifiers = [fields[name] for name in _IDENTIFIERS if name in fields]
         if not identifiers or any(
-            not value.isascii() or not value.isdecimal() or int(value) <= 0
+            not value.isascii() or not value.isdecimal() or not value.lstrip("0")
             for value in identifiers
         ):
             raise CredentialError(
@@ -70,7 +70,7 @@ class Credentials:
         if not (legacy or modern):
             raise CredentialError(
                 "Missing authentication cookies: provide ltuid and ltoken, "
-                "or ltuid_v2 and ltoken_v2, from a full HoYoLAB Cookie header."
+                "or ltuid_v2 and ltoken_v2."
             )
         object.__setattr__(self, "fields", MappingProxyType(fields))
 
@@ -80,9 +80,9 @@ class Credentials:
     def same_identity(self, other: "Credentials") -> bool:
         """Compare validated IDs without disclosing them or their cookie spelling."""
 
-        def identity(credentials: "Credentials") -> int:
+        def identity(credentials: "Credentials") -> str:
             return next(
-                int(credentials.fields[key])
+                credentials.fields[key].lstrip("0")
                 for key in _IDENTIFIERS
                 if key in credentials.fields
             )
@@ -90,7 +90,13 @@ class Credentials:
         return identity(self) == identity(other)
 
 
+def manual_credentials(ltuid_v2: str, ltoken_v2: str) -> Credentials:
+    """Validate a private staged pair, preserving the token's internal characters."""
+    return Credentials({"ltuid_v2": ltuid_v2.strip(), "ltoken_v2": ltoken_v2.strip()})
+
+
 def parse_cookie_header(raw: str) -> Credentials:
+    """Parse internal legacy fixtures; interactive entry uses manual_credentials."""
     fields: dict[str, str] = {}
     if any(ord(char) < 32 or ord(char) == 127 for char in raw):
         raise CredentialError("Invalid Cookie header; use semicolon-separated pairs.")

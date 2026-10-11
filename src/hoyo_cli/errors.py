@@ -138,7 +138,7 @@ class BrowserImportError(CredentialError):
         *,
         code: ErrorCode = ErrorCode.BROWSER_IMPORT,
         hint: str | None = (
-            "Retry browser import or paste a full HoYoLAB Cookie header during "
+            "Retry browser import or enter ltuid_v2 / ltoken_v2 manually during "
             "profile setup. Use hoyo profile edit <name> for an existing profile."
         ),
     ) -> None:

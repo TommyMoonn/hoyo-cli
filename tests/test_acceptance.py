@@ -18,7 +18,7 @@ from profile_fixtures import ProfileSeed, save_profile
 from rich.cells import cell_len
 
 from hoyo_cli.auth.browser_import import BrowserProfile, BrowserSession, browser_error
-from hoyo_cli.auth.credentials import parse_cookie_header
+from hoyo_cli.auth.credentials import manual_credentials, parse_cookie_header
 from hoyo_cli.auth.plaintext_backend import PlaintextStore
 from hoyo_cli.cli import main
 from hoyo_cli.config.models import GameSelection, ProfileConfig
@@ -285,8 +285,8 @@ def test_new_account_selection_review_and_cancel_journey(
     # New name, manual session, second Genshin/first HSR, skip ZZZ,
     # storage consent, final Save/Cancel.
     answers = (
-        "journey\n3\nn\n"
-        + TEST_COOKIE
+        "journey\n3\n1\n"
+        + "123\nacceptance-secret-not-real"
         + "\n2\n1\n3\n"
         + backend
         + ("1\n" if save else "2\n")
@@ -298,7 +298,9 @@ def test_new_account_selection_review_and_cancel_journey(
     assert "First hsr / Asia" in result.stdout
     assert "Skip this game" in result.stdout
     assert "Enable game?" not in result.stdout
-    env.discovery.discover.assert_called_once_with(parse_cookie_header(TEST_COOKIE))
+    env.discovery.discover.assert_called_once_with(
+        manual_credentials("123", "acceptance-secret-not-real")
+    )
     env.browser.list_sessions.assert_not_called()
     env.browser.import_session.assert_not_called()
     assert_safe_output(result.output)
@@ -379,19 +381,22 @@ def test_browser_recovery_manual_fallback_through_setup(
     result = runner.invoke(
         main,
         ["profile", "edit", "main", "--no-color"],
-        input="3\ny\ny\n1\n2\n3\n"
-        + TEST_COOKIE
+        input="3\ny\n2\n1\n2\n3\n"
+        + "123\nacceptance-secret-not-real"
         + "\n1\n1\n1\n"
         + ("1\n" if save else "2\n"),
     )
     assert result.exit_code == (0 if save else 1), result.output
     assert message in result.stderr
     assert (
-        "Browser recovery" in result.stdout and "Paste Cookie header" in result.stdout
+        "Browser recovery" in result.stdout
+        and "Enter ltuid_v2 / ltoken_v2 manually" in result.stdout
     )
     assert "Session verified" in result.stdout
     env.browser.import_session.assert_called_once_with("brave:1")
-    env.discovery.discover.assert_called_once_with(parse_cookie_header(TEST_COOKIE))
+    env.discovery.discover.assert_called_once_with(
+        manual_credentials("123", "acceptance-secret-not-real")
+    )
     if not save:
         assert env.config.read_bytes() == before
         assert (
@@ -947,7 +952,7 @@ def test_commented_config_survives_account_edit(
     }
     # Session-update action, explicit replacement consent, source selection,
     # three characters, and Save. Backend/default/order are retained.
-    session_answers = "n\n" + TEST_COOKIE + "\n"
+    session_answers = "1\n123\nacceptance-secret-not-real\n"
     if source == "browser":
         acceptance_env.browser.list_sessions.return_value = (
             BrowserSession("edge", "Edge"),
@@ -959,7 +964,7 @@ def test_commented_config_survives_account_edit(
         acceptance_env.browser.list_profiles.return_value = (
             BrowserProfile("chrome", "chrome", "Library-selected profile"),
         )
-        session_answers = "y\n2\n"
+        session_answers = "2\n2\n"
     answers = "3\ny\n" + session_answers + "1\n1\n1\n1\n"
     result = runner.invoke(main, ["profile", "edit", "main"], input=answers)
     assert result.exit_code == 0, result.output

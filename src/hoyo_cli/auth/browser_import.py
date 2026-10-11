@@ -55,11 +55,12 @@ _RECOVERY: dict[ErrorCode, tuple[str, str]] = {
     ErrorCode.BROWSER_LOCKED: (
         "The selected browser's cookie database is locked.",
         "Close the selected browser fully, including background processes, and retry. "
-        "You can also choose another browser or paste a Cookie header manually.",
+        "You can also choose another browser or enter ltuid_v2 / ltoken_v2 manually.",
     ),
     ErrorCode.BROWSER_ACCESS_DENIED: (
         "Access to the selected browser profile was denied.",
-        "Choose another supported browser/profile or paste a Cookie header manually.",
+        "Choose another supported browser/profile or enter "
+        "ltuid_v2 / ltoken_v2 manually.",
     ),
     ErrorCode.BROWSER_PROFILE_MISSING: (
         "The selected browser profile or cookie database is unavailable.",
@@ -75,23 +76,26 @@ _RECOVERY: dict[ErrorCode, tuple[str, str]] = {
     ),
     ErrorCode.BROWSER_DECRYPTION: (
         "This browser's cookie encryption cannot be read by the supported reader.",
-        "Choose another supported source or paste a Cookie header manually.",
+        "Choose another supported source or enter ltuid_v2 / ltoken_v2 manually.",
     ),
     ErrorCode.BROWSER_UNSUPPORTED: (
         "This browser or profile selection is not supported on this platform.",
-        "Choose a listed supported source or paste a Cookie header manually.",
+        "Choose a listed supported source or enter ltuid_v2 / ltoken_v2 manually.",
     ),
     ErrorCode.BROWSER_STORAGE: (
         "The browser reader could not access the selected cookie storage.",
-        "Retry, choose another supported source, or paste a Cookie header manually.",
+        "Retry, choose another supported source, or enter "
+        "ltuid_v2 / ltoken_v2 manually.",
     ),
     ErrorCode.BROWSER_TIMEOUT: (
         "Reading the selected browser profile timed out.",
-        "Retry, choose another supported source, or paste a Cookie header manually.",
+        "Retry, choose another supported source, or enter "
+        "ltuid_v2 / ltoken_v2 manually.",
     ),
     ErrorCode.BROWSER_UNKNOWN: (
         "The selected browser could not be imported.",
-        "Retry, choose another supported source, or paste a Cookie header manually.",
+        "Retry, choose another supported source, or enter "
+        "ltuid_v2 / ltoken_v2 manually.",
     ),
 }
 

@@ -69,8 +69,8 @@ def test_keyring_setup_and_rollback_after_config_failure(
     with patch("hoyo_cli.commands.init.open_store", return_value=store):
 
         def fail_commit(*args: object) -> None:
-            assert store.get("main") == parse_cookie_header(
-                "ltuid=123; ltoken=test-secret-123"
+            assert store.get("main") == Credentials(
+                {"ltuid_v2": "123", "ltoken_v2": "test-secret-123"}
             )
             raise AppError("Simulated config failure")
 
@@ -142,9 +142,9 @@ def test_cli_init_hidden_cookie_and_config_inspection(
     tmp_path: Path, runner: CliRunner
 ) -> None:
     config, secrets = tmp_path / "config.toml", tmp_path / "credentials.toml"
-    # Account; decline browser; hidden cookie; select three games;
+    # Profile; manual source; two hidden values; select three games;
     # accept default order; plaintext; explicit consent; save.
-    answers = "main\nn\nltuid=123; ltoken=test-secret-123\n1\n1\n1\ny\n2\ny\n1\n"
+    answers = "main\n1\n123\ntest-secret-123\n1\n1\n1\ny\n2\ny\n1\n"
     with (
         patch("hoyo_cli.commands.init.config_path", return_value=config),
         patch("hoyo_cli.commands.init.credentials_path", return_value=secrets),
@@ -171,7 +171,7 @@ def test_cli_invalid_cookie_offers_recovery_and_eof_cancels_without_echo(
         "hoyo_cli.commands.init.config_path", return_value=tmp_path / "config.toml"
     ):
         result = runner.invoke(
-            main, ["init"], input="main\nn\nltoken=test-secret-123\n"
+            main, ["init"], input="main\n1\ninvalid-id\ntest-secret-123\n"
         )
     assert result.exit_code == 1
     assert "Session recovery" in result.output
@@ -189,7 +189,7 @@ def test_cli_cancelled_browser_menu_does_not_import(
         ),
         patch("hoyo_cli.commands.init.SystemBrowserImporter", return_value=browser),
     ):
-        result = runner.invoke(main, ["init"], input="main\ny\n4\n")
+        result = runner.invoke(main, ["init"], input="main\n2\n4\n")
     assert result.exit_code == 1
     assert browser.imported == []
     assert not (tmp_path / "config.toml").exists()
@@ -223,9 +223,9 @@ def test_cli_browser_lock_recovery_is_actionable_and_secret_safe(
     first_failure = browser_error(ErrorCode.BROWSER_LOCKED)
     recovered = parse_cookie_header("ltuid=123; ltoken=test-secret-123")
     recovery_answer = {"retry": "1", "manual": "3", "cancel": "4"}[recovery]
-    answers = "main\ny\n2\n" + recovery_answer + "\n"
+    answers = "main\n2\n2\n" + recovery_answer + "\n"
     if recovery == "manual":
-        answers += "ltuid=123; ltoken=test-secret-123\n"
+        answers += "123\ntest-secret-123\n"
     if recovery != "cancel":
         answers += "1\n1\n1\ny\n2\ny\n1\n"
     with (
@@ -301,7 +301,11 @@ def test_reconfiguration_disables_undiscovered_games_and_retains_uids(
     class ReplacementIO(FakeIO):
         def secret(self, prompt: str) -> str:
             if replacement_uid == 999999999:
-                return "ltuid=456; ltoken=test-replacement-secret"
+                return (
+                    "456"
+                    if prompt.startswith("ltuid_v2")
+                    else "test-replacement-secret"
+                )
             return super().secret(prompt)
 
     discovery = FakeDiscovery()
@@ -339,7 +343,9 @@ def test_reconfiguration_disables_undiscovered_games_and_retains_uids(
     assert account.games["hsr"] == GameSelection(False, 222222222)
     assert account.games["zzz"] == GameSelection(False, 333333333)
     assert enabled_games(parsed, account) == ("genshin",)
-    assert store.get("main") == parse_cookie_header(io.secret("test"))
+    assert store.get("main") == Credentials(
+        {"ltuid_v2": "123", "ltoken_v2": "test-secret-123"}
+    )
     output = capsys.readouterr().out
     assert "hsr:" in output and "zzz:" in output
     assert "will be disabled" in output
@@ -487,7 +493,7 @@ def test_partial_rediscovery_failure_preserves_original_enabled_games_and_secret
 
     class ReplacementIO(FakeIO):
         def secret(self, prompt: str) -> str:
-            return "ltuid=123; ltoken=test-replacement-secret"
+            return "123" if prompt.startswith("ltuid_v2") else "test-replacement-secret"
 
     only_genshin: dict[GameId, tuple[CharacterRef, ...]] = {
         "genshin": (CharacterRef("genshin", 999999999, "test", "New Traveler"),)
@@ -506,8 +512,8 @@ def test_partial_rediscovery_failure_preserves_original_enabled_games_and_secret
         else:
 
             def fail_commit(*args: object) -> None:
-                assert PlaintextStore(secrets).get("main") == parse_cookie_header(
-                    "ltuid=123; ltoken=test-replacement-secret"
+                assert PlaintextStore(secrets).get("main") == Credentials(
+                    {"ltuid_v2": "123", "ltoken_v2": "test-replacement-secret"}
                 )
                 raise AppError("Simulated config failure")
 
@@ -577,25 +583,25 @@ class FakeIO:
             return "Add new HoYoLAB login"
         if prompt == "Credential backend":
             return self.backend
+        if prompt == "Login source":
+            return choices[1] if self.browser else choices[0]
         if prompt == "HoYoLAB session":
-            return choices[1] if self.browser else "Paste Cookie header"
+            return choices[1] if self.browser else "Enter ltuid_v2 / ltoken_v2 manually"
         if prompt == "Browser recovery":
-            return "Paste Cookie header"
+            return "Enter ltuid_v2 / ltoken_v2 manually"
         return choices[0]
 
     def confirm(self, prompt: str) -> bool:
         self.prompts.append(prompt)
         if self.cancel and self.cancel in prompt:
             raise click.Abort()
-        if prompt.startswith("Import"):
-            return self.browser
         if prompt.startswith("Replace"):
             return self.replace
         return True
 
     def secret(self, prompt: str) -> str:
         self.prompts.append(prompt)
-        return "ltuid=123; ltoken=test-secret-123"
+        return "123" if prompt.startswith("ltuid_v2") else "test-secret-123"
 
 
 class FakeBrowser:
@@ -653,7 +659,11 @@ def test_browser_verification_retry_reuses_extracted_cookies(tmp_path: Path) -> 
 
 @pytest.mark.parametrize(
     "recovery",
-    ["Retry browser import", "Choose another browser/profile", "Paste Cookie header"],
+    [
+        "Retry browser import",
+        "Choose another browser/profile",
+        "Enter ltuid_v2 / ltoken_v2 manually",
+    ],
 )
 def test_selected_browser_failure_recovers_without_restarting_account(
     tmp_path: Path, recovery: str, capsys: pytest.CaptureFixture[str]
@@ -692,7 +702,7 @@ def test_selected_browser_failure_recovers_without_restarting_account(
         == {
             "Retry browser import": ["edge", "edge"],
             "Choose another browser/profile": ["edge", "chrome"],
-            "Paste Cookie header": ["edge"],
+            "Enter ltuid_v2 / ltoken_v2 manually": ["edge"],
         }[recovery]
     )
     assert io.prompts.count("Profile name") == 1
@@ -1119,9 +1129,7 @@ def test_cli_unexpected_discovery_failure_is_redacted(
             discovery, "discover", side_effect=RuntimeError("test-secret-123")
         ),
     ):
-        result = runner.invoke(
-            main, ["init"], input="main\nn\nltuid=123; ltoken=test-secret-123\n"
-        )
+        result = runner.invoke(main, ["init"], input="main\n1\n123\ntest-secret-123\n")
     assert result.exit_code == 1
     assert "setup failed" in result.output
     assert "test-secret-123" not in result.output
@@ -1275,7 +1283,7 @@ def test_guided_setup_labels_identity_and_reviews_before_write(
     }
     # Account, manual session, second Genshin role, HSR role, default order,
     # plaintext consent, then Enter to save the reviewed candidate.
-    answers = "main\nn\nltuid=123; ltoken=test-secret-123\n2\n1\ny\n2\ny\n\n"
+    answers = "main\n1\n123\ntest-secret-123\n2\n1\ny\n2\ny\n\n"
     with (
         patch("hoyo_cli.commands.init.config_path", return_value=config),
         patch("hoyo_cli.commands.init.credentials_path", return_value=secrets),
@@ -1365,7 +1373,7 @@ def test_manual_cookie_input_recovers_locally_without_discovery_on_bad_input(
 
         def choose(self, prompt: str, choices: Sequence[str]) -> str:
             if prompt == "Session recovery":
-                return "Paste Cookie header again"
+                return "Enter ltuid_v2 / ltoken_v2 again"
             return super().choose(prompt, choices)
 
     io, discovery = RetryIO(), FakeDiscovery()
@@ -1413,7 +1421,8 @@ def test_manual_discovery_retry_keeps_account_and_in_memory_session(
         )
     assert verify.call_count == 2
     assert verify.call_args_list[0].args[0] is verify.call_args_list[1].args[0]
-    assert io.prompts.count("Full HoYoLAB Cookie header (hidden)") == 1
+    assert io.prompts.count("ltuid_v2 (HoYoLAB account ID, hidden)") == 1
+    assert io.prompts.count("ltoken_v2 (session token, hidden)") == 1
     assert io.prompts.count("Profile name") == 1
 
 
@@ -1464,17 +1473,14 @@ def test_rejected_manual_session_can_change_source_without_restarting_account(
         def choose(self, prompt: str, choices: Sequence[str]) -> str:
             if prompt == "Session recovery":
                 return "Change credential source"
-            return super().choose(prompt, choices)
-
-        def confirm(self, prompt: str) -> bool:
-            if prompt.startswith("Import"):
+            if prompt == "Login source":
                 self.prompts.append(prompt)
-                return self.prompts.count(prompt) == 2
-            return super().confirm(prompt)
+                return choices[0] if self.prompts.count(prompt) == 1 else choices[1]
+            return super().choose(prompt, choices)
 
         def secret(self, prompt: str) -> str:
             self.prompts.append(prompt)
-            return "ltuid=456; ltoken=rejected-secret"
+            return "456" if prompt.startswith("ltuid_v2") else "rejected-secret"
 
     config, secrets = tmp_path / "config.toml", tmp_path / "credentials.toml"
     io, discovery, browser = SourceIO(browser=True), FakeDiscovery(), FakeBrowser()
@@ -1607,7 +1613,7 @@ def test_sensitive_consent_defaults_to_no_in_real_command(
     answers = (
         "3\n\n"
         if action == "overwrite"
-        else ("main\nn\nltuid=123; ltoken=test-secret-123\n\n\n\n\n2\n\n")
+        else ("main\n1\n123\ntest-secret-123\n\n\n\n\n2\n\n")
     )
     with (
         patch("hoyo_cli.commands.init.config_path", return_value=config),
@@ -1732,7 +1738,7 @@ def test_character_changes_verify_saved_session_without_resaving_secrets(
         )
     get.assert_called_once_with("main")
     discover.assert_called_once_with(
-        parse_cookie_header("ltuid=123; ltoken=test-secret-123")
+        Credentials({"ltuid_v2": "123", "ltoken_v2": "test-secret-123"})
     )
     put.assert_not_called()
     checkpoint.assert_not_called()

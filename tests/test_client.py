@@ -10,8 +10,13 @@ from unittest.mock import AsyncMock, Mock, patch
 import aiohttp
 import genshin
 import pytest
+from genshin.client.manager.managers import CookieManager
 
-from hoyo_cli.auth.credentials import parse_cookie_header
+from hoyo_cli.auth.credentials import (
+    Credentials,
+    manual_credentials,
+    parse_cookie_header,
+)
 from hoyo_cli.errors import (
     AlreadyCheckedInError,
     AppError,
@@ -637,3 +642,60 @@ async def test_phase5_real_notes_methods_never_enable_settings(
             )
     assert read.await_count == 1
     mutate.assert_not_called()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("game", ["genshin", "hsr", "zzz"])
+@pytest.mark.parametrize("operation", ["status", "state", "claim"])
+async def test_modern_pair_passes_through_real_gateway_transport(
+    game: GameId, operation: str
+) -> None:
+    credentials = manual_credentials("123", "synthetic-modern-token/+==")
+    client = create_client(credentials)
+    session, response = AsyncMock(), AsyncMock()
+    session.__aenter__.return_value = session
+    response.__aenter__.return_value = response
+    response.content_type = "application/json"
+    response.cookies = {}
+    data: object = {}
+    if operation == "status":
+        data = json.loads(
+            (Path(__file__).parent / f"fixtures/{game}_notes.json").read_text()
+        )
+    elif operation == "state":
+        data = {"is_sign": False, "total_sign_day": 0}
+    response.json.return_value = {"retcode": 0, "data": data}
+    session.request = Mock(return_value=response)
+    uid = 1000000001 if game == "zzz" else 800000001
+    with patch.object(client.cookie_manager, "create_session", return_value=session):
+        gateway = GenshinPyGateway(credentials, client=client)
+        if operation == "status":
+            assert (await gateway.fetch_status(game, uid)).game == game
+        elif operation == "state":
+            assert not (await gateway.check_in_state(game, uid)).already_checked_in
+        else:
+            await gateway.claim_check_in(game, uid)
+    session.request.assert_called_once()
+    request = session.request.call_args
+    assert request.kwargs["cookies"] == dict(credentials.fields)
+    assert request.args[0] == ("POST" if operation == "claim" else "GET")
+    assert session.__aexit__.await_count == response.__aexit__.await_count == 1
+
+
+@pytest.mark.parametrize(
+    "credentials",
+    [
+        parse_cookie_header("ltuid=123; ltoken=legacy-synthetic-token"),
+        parse_cookie_header(
+            "ltuid_v2=123; ltoken_v2=browser-synthetic-token; ltmid_v2=synthetic-mid; "
+            "account_id_v2=123; cookie_token_v2=synthetic-cookie; "
+            "account_mid_v2=synthetic-mid"
+        ),
+    ],
+)
+def test_existing_credentials_preserve_all_fields_in_real_client(
+    credentials: Credentials,
+) -> None:
+    manager = create_client(credentials).cookie_manager
+    assert isinstance(manager, CookieManager)
+    assert manager.cookies == dict(credentials.fields)

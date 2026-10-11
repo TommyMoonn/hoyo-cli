@@ -30,7 +30,11 @@ from hoyo_cli.auth.browser_import import (
     classify_browser_failure,
     read_browser_profile,
 )
-from hoyo_cli.auth.credentials import deserialize_credentials, parse_cookie_header
+from hoyo_cli.auth.credentials import (
+    deserialize_credentials,
+    manual_credentials,
+    parse_cookie_header,
+)
 from hoyo_cli.cli import main
 from hoyo_cli.commands import init
 from hoyo_cli.errors import BrowserImportError, ErrorCode
@@ -598,7 +602,7 @@ def test_windows_brave_lock_recovers_in_account_edit_without_saving_on_cancel(
         result = runner.invoke(
             main,
             ["profile", "edit", "main", "--no-color"],
-            input="3\ny\ny\n1\n1\n3\n" + TEST_COOKIE + "\n1\n1\n1\n2\n",
+            input="3\ny\n2\n1\n1\n3\n123\nacceptance-secret-not-real\n1\n1\n1\n2\n",
         )
     assert result.exit_code == 1, result.output
     assert "cookie database is locked" in result.stderr
@@ -612,6 +616,8 @@ def test_windows_brave_lock_recovers_in_account_edit_without_saving_on_cancel(
     assert (
         env.credentials.read_bytes() if env.credentials.exists() else None
     ) == secrets
-    env.discovery.discover.assert_called_once_with(parse_cookie_header(TEST_COOKIE))
+    env.discovery.discover.assert_called_once_with(
+        manual_credentials("123", "acceptance-secret-not-real")
+    )
     env.keyring.set_password.assert_not_called()
     env.keyring.delete_password.assert_not_called()

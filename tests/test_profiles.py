@@ -271,7 +271,7 @@ def test_different_identity_refresh_cannot_replace_shared_login(tmp_path: Path) 
 
     class OtherIdentityIO(FakeIO):
         def secret(self, prompt: str) -> str:
-            return "ltuid_v2=456; ltoken_v2=other-identity-secret"
+            return "456" if prompt.startswith("ltuid_v2") else "other-identity-secret"
 
     with pytest.raises(CredentialError, match="different HoYoLAB identity") as error:
         run_edit_profile(
@@ -361,7 +361,7 @@ def test_region_picker_and_review_in_real_cli(
     if command == "init":
         path, secrets = tmp_path / "config.toml", tmp_path / "credentials.toml"
         args = ["init"]
-        answers = "main\nn\nltuid=123; ltoken=hidden-synthetic\n2\ny\n2\ny\n1\n"
+        answers = "main\n1\n123\nhidden-synthetic\n2\ny\n2\ny\n1\n"
     else:
         path, secrets = seed_shared(tmp_path)
         args = ["profile", command, "second" if command == "add" else "main"]
