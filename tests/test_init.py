@@ -1543,6 +1543,43 @@ class SettingsIO(FakeIO):
         return super().confirm(prompt)
 
 
+def test_init_default_action_uses_targeted_repository_operation(tmp_path: Path) -> None:
+    from hoyo_cli.config.repository import prepare_default_account
+
+    config, secrets = tmp_path / "config.toml", tmp_path / "credentials.toml"
+    run_init(config, secrets, FakeIO(), FakeBrowser(), FakeDiscovery())
+    run_init(config, secrets, FakeIO(name="alt"), FakeBrowser(), FakeDiscovery())
+    current = load_config(config)
+    save_account(
+        config, "main", current.accounts["main"], make_default=True, game_order=()
+    )
+    original = config.read_bytes()
+    original_secrets = secrets.read_bytes()
+    with (
+        patch(
+            "hoyo_cli.commands.init.prepare_account",
+            side_effect=AssertionError("Default switching must not rewrite an account"),
+        ) as account_write,
+        patch(
+            "hoyo_cli.commands.init.prepare_default_account",
+            wraps=prepare_default_account,
+        ) as default_write,
+    ):
+        run_init(
+            config,
+            secrets,
+            SettingsIO(action="Default account"),
+            FakeBrowser(),
+            FakeDiscovery(),
+        )
+    account_write.assert_not_called()
+    default_write.assert_called_once_with(config, "alt")
+    assert config.read_bytes() == original.replace(
+        b'default_account = "main"', b'default_account = "alt"', 1
+    )
+    assert secrets.read_bytes() == original_secrets
+
+
 @pytest.mark.parametrize(
     "action", ["Game order", "Default account", "Games and characters"]
 )

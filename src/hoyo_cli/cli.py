@@ -5,7 +5,7 @@ from typing import TypeVar
 
 import click
 
-from hoyo_cli.commands import CommandOptions, check_in, config, init, status
+from hoyo_cli.commands import CommandOptions, account, check_in, config, init, status
 from hoyo_cli.errors import AppError
 from hoyo_cli.models.common import GAME_IDS, GameId
 from hoyo_cli.render.errors import format_error
@@ -39,7 +39,12 @@ def _common_options(
 ) -> Callable[[_Callback], _Callback]:
     def decorate(callback: _Callback) -> _Callback:
         callback = click.option(
-            "--account", metavar="NAME", help="Select an exact named account."
+            "--account",
+            metavar="NAME",
+            help=(
+                "Select an exact named account for one invocation; "
+                "keep the saved default."
+            ),
         )(callback)
         callback = click.option(
             "--no-color", is_flag=True, help="Disable terminal styling."
@@ -84,12 +89,33 @@ def main(
       hoyo genshin       Show one game's status.
       hoyo check-in zzz  Claim daily rewards for one game.
       hoyo config        Inspect selections, including disabled games.
+      hoyo account       List accounts and mark the saved default.
+      hoyo account use NAME  Change the persistent default account.
     """
     ctx.obj = CommandOptions(account=account, detailed=detailed, no_color=no_color)
     if ctx.invoked_subcommand is None:
         ctx.invoke(
             status_command, game=None, account=None, detailed=False, no_color=False
         )
+
+
+@main.group(name="account", invoke_without_command=True)
+@click.pass_context
+def account_command(ctx: click.Context) -> None:
+    """List accounts or change the persistent default with use NAME.
+
+    Listing and switching do not access credentials or contact HoYoLAB.
+    --account on status/check-in selects an account for one invocation only.
+    """
+    if ctx.invoked_subcommand is None:
+        account.list_accounts()
+
+
+@account_command.command(name="use")
+@click.argument("name", metavar="NAME")
+def account_use_command(name: str) -> None:
+    """Save NAME as the default for future commands. Names must match exactly."""
+    account.use_account(name)
 
 
 @main.command(name="status")

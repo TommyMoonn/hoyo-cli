@@ -30,7 +30,12 @@ from hoyo_cli.config.models import (
     resolve_account,
 )
 from hoyo_cli.config.paths import config_path, credentials_path
-from hoyo_cli.config.repository import commit_config, load_config, prepare_account
+from hoyo_cli.config.repository import (
+    commit_config,
+    load_config,
+    prepare_account,
+    prepare_default_account,
+)
 from hoyo_cli.errors import (
     AppError,
     BackendUnavailable,
@@ -398,6 +403,7 @@ class _SetupChanges:
     default_account: str
     order: tuple[GameId, ...]
     secret_update: tuple[CredentialStore, Credentials] | None = None
+    default_only: bool = False
 
 
 def _new_account(
@@ -595,7 +601,14 @@ def _existing_account(
                 raise click.Abort()
             account = AccountConfig(backend, account.games)
             secret_update = (store, credentials)
-    return _SetupChanges(account, characters, default_account, order, secret_update)
+    return _SetupChanges(
+        account,
+        characters,
+        default_account,
+        order,
+        secret_update,
+        default_only=action == "Default account",
+    )
 
 
 def _run_init(
@@ -644,13 +657,16 @@ def _run_init(
             no_color=no_color,
         )
     )
-    prepared = prepare_account(
-        config_file,
-        name,
-        changes.account,
-        make_default=changes.default_account == name,
-        game_order=changes.order,
-        default_account=changes.default_account,
+    prepared = (
+        prepare_default_account(config_file, changes.default_account)
+        if changes.default_only
+        else prepare_account(
+            config_file,
+            name,
+            changes.account,
+            make_default=changes.default_account == name,
+            game_order=changes.order,
+        )
     )
     presenter.review(
         name=name,

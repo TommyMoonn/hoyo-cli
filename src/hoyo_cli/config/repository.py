@@ -13,7 +13,12 @@ from tomlkit.exceptions import ParseError
 from tomlkit.items import Item
 from tomlkit.toml_document import TOMLDocument
 
-from hoyo_cli.config.models import AccountConfig, AppConfig, parse_config
+from hoyo_cli.config.models import (
+    AccountConfig,
+    AppConfig,
+    parse_config,
+    resolve_account,
+)
 from hoyo_cli.errors import ConfigError, ErrorCode
 from hoyo_cli.models.common import GAME_IDS, GameId
 
@@ -123,6 +128,27 @@ class PreparedConfig:
     path: Path
     content: str
     original: bytes | None
+    conflict_hint: str = "Rerun hoyo init."
+
+
+def prepare_default_account(path: Path, name: str) -> PreparedConfig:
+    """Validate an exact existing name and prepare only the default field change."""
+    _reject_symlink(path)
+    document, original = _read_snapshot(path)
+    config = _validate(document, path)
+    try:
+        resolve_account(config, name)
+    except ConfigError:
+        raise ConfigError(
+            "Unknown account name; names must match exactly.",
+            hint="Run: hoyo account",
+        ) from None
+    _set_field(document, "default_account", name)
+    content = tomlkit.dumps(document)
+    _validate(tomlkit.parse(content), path)
+    return PreparedConfig(
+        path, content, original, conflict_hint="Retry hoyo account use NAME."
+    )
 
 
 def prepare_account(
@@ -132,7 +158,6 @@ def prepare_account(
     *,
     make_default: bool,
     game_order: tuple[GameId, ...],
-    default_account: str | None = None,
 ) -> PreparedConfig:
     _reject_symlink(path)
     if path.exists():
@@ -146,9 +171,7 @@ def prepare_account(
         document["game_order"] = list(game_order)
         document["display"] = tomlkit.table().add("color", "auto")
 
-    if default_account is not None:
-        _set_field(document, "default_account", default_account)
-    elif make_default:
+    if make_default:
         _set_field(document, "default_account", name)
     _set_field(document, "game_order", list(game_order))
     accounts = _ensure_table(document, "accounts")
@@ -181,8 +204,8 @@ def commit_config(prepared: PreparedConfig) -> None:
         ) from None
     if current != prepared.original:
         raise ConfigError(
-            "Configuration changed during setup; rerun hoyo init.\n"
-            f"Config: {prepared.path}"
+            f"Configuration changed before saving.\nConfig: {prepared.path}",
+            hint=prepared.conflict_hint,
         )
     _atomic_write(prepared.path, prepared.content)
 

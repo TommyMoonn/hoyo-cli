@@ -28,6 +28,70 @@ from hoyo_cli.models.common import GAME_IDS, GameId
 from hoyo_cli.render import progress
 
 
+@pytest.mark.parametrize("command", [[], ["status"], ["genshin"], ["check-in"]])
+def test_persisted_default_and_invocation_override_remain_account_isolated(
+    runner: CliRunner,
+    acceptance_env: AcceptanceEnvironment,
+    command: list[str],
+) -> None:
+    env = acceptance_env
+    alternate_uid = 999999999
+    save_account(
+        env.config,
+        "alt",
+        AccountConfig(env.backend, {"genshin": GameSelection(True, alternate_uid)}),
+        make_default=False,
+        game_order=GAME_IDS,
+    )
+    original = env.config.read_bytes()
+    secret_bytes = env.credentials.read_bytes() if env.credentials.exists() else None
+    with patch.object(PlaintextStore, "get") as plaintext_get:
+        listing = runner.invoke(main, ["account"])
+        switched = runner.invoke(main, ["account", "use", "alt"])
+    assert listing.exit_code == switched.exit_code == 0, switched.output
+    plaintext_get.assert_not_called()
+    env.keyring.get_password.assert_not_called()
+    env.keyring.set_password.assert_not_called()
+    env.keyring.delete_password.assert_not_called()
+    env.client.get_reward_info.assert_not_called()
+    env.client.claim_daily_reward.assert_not_called()
+    for game in GAME_IDS:
+        env.notes(game).assert_not_called()
+    assert env.config.read_bytes() == original.replace(
+        b'default_account = "main"', b'default_account = "alt"', 1
+    )
+    persisted = env.config.read_bytes()
+    for requested, expected_uid in (
+        (None, alternate_uid),
+        ("main", TEST_UIDS["genshin"]),
+        (None, alternate_uid),
+    ):
+        env.client.reset_mock()
+        arguments = [*(["--account", requested] if requested else []), *command]
+        result = runner.invoke(main, arguments)
+        assert result.exit_code == 0, result.output
+        if command == ["check-in"]:
+            assert env.client.uids[genshin.Game.GENSHIN] == expected_uid
+            env.client.claim_daily_reward.assert_any_await(
+                game=genshin.Game.GENSHIN, reward=False
+            )
+            expected_claims = 3 if requested else 1
+            assert env.client.claim_daily_reward.await_count == expected_claims
+        else:
+            env.notes("genshin").assert_awaited_once_with(
+                expected_uid, autoauth=False, return_raw_data=True
+            )
+            env.client.claim_daily_reward.assert_not_called()
+        assert env.config.read_bytes() == persisted
+        assert load_config(env.config).default_account == "alt"
+    assert (
+        env.credentials.read_bytes() if env.credentials.exists() else None
+    ) == secret_bytes
+    env.browser.list_sessions.assert_not_called()
+    env.browser.import_session.assert_not_called()
+    env.discovery.discover.assert_not_called()
+
+
 @pytest.mark.parametrize("width", [48, 70, 100])
 @pytest.mark.parametrize(
     "failure, summary, recovery",
