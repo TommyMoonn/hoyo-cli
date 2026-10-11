@@ -99,7 +99,7 @@ def test_persisted_default_and_invocation_override_remain_account_isolated(
         (
             genshin.errors.InvalidCookies(msg="acceptance-secret-not-real"),
             "rejected",
-            "hoyo init",
+            "hoyo account edit NAME",
         ),
         (TimeoutError("acceptance-secret-not-real"), "timed out", "connection"),
         (ValueError("acceptance-secret-not-real"), "unsupported", "hoyo-cli"),
@@ -120,7 +120,7 @@ def test_partial_result_preserves_safe_cause_and_recovery(
     assert result.exit_code == 0, result.output
     assert "190 / 200" in result.stdout and "89 / 240" in result.stdout
     assert "Error:" in result.stdout and "Try:" in result.stdout
-    assert summary in result.stdout and recovery in result.stdout
+    assert summary in result.stdout and recovery in " ".join(result.stdout.split())
     assert not result.stderr
     assert all(
         value not in result.output
@@ -144,7 +144,7 @@ def test_check_in_failure_shows_hint_without_erasing_claimed_siblings(
     assert result.exit_code == 1
     assert result.stdout.count("Claimed") == 2
     assert "Failed" in result.stdout and "Error:" in result.stdout
-    assert "Try:" in result.stdout and "hoyo init" in result.stdout
+    assert "Try:" in result.stdout and "hoyo account edit NAME" in result.stdout
     assert "acceptance-secret-not-real" not in result.output
     assert acceptance_env.client.claim_daily_reward.await_count == 2
 
@@ -258,16 +258,16 @@ def test_new_account_selection_review_and_cancel_journey(
         for game, uid in TEST_UIDS.items()
     }
     backend = "1\n" if env.backend == "keyring" else "2\ny\n"
-    # Create account, manual session, second Genshin/first HSR, skip ZZZ,
-    # retain default account/order, storage consent, final Save/Cancel.
+    # New name, manual session, second Genshin/first HSR, skip ZZZ,
+    # storage consent, final Save/Cancel.
     answers = (
-        "3\njourney\nn\n"
+        "journey\nn\n"
         + TEST_COOKIE
-        + "\n2\n1\n3\nn\ny\n"
+        + "\n2\n1\n3\n"
         + backend
         + ("1\n" if save else "2\n")
     )
-    result = runner.invoke(main, ["init", "--no-color"], input=answers)
+    result = runner.invoke(main, ["account", "add", "--no-color"], input=answers)
     assert result.exit_code == (0 if save else 1), result.output
     assert "Step 4/4" in result.stdout and "Review" in result.stdout
     assert "Second genshin / America" in result.stdout
@@ -309,11 +309,11 @@ def test_settings_only_journey_with_unavailable_secrets(
     stored = env.credentials.read_bytes()
     result = runner.invoke(
         main,
-        ["init", "--account", "main", "--no-color"],
-        input="2\nn\n3\n2\n1\n" + ("1\n" if save else "2\n"),
+        ["config", "--no-color", "order"],
+        input="n\n3\n2\n1\n" + ("1\n" if save else "2\n"),
     )
     assert result.exit_code == (0 if save else 1), result.output
-    assert "Review changes" in result.stdout
+    assert "Review game order" in result.stdout
     if save:
         assert load_config(env.config).game_order == ("zzz", "hsr", "genshin")
     else:
@@ -354,8 +354,8 @@ def test_browser_recovery_manual_fallback_through_setup(
     # Explicit session replacement, Brave/Profile 2, recover with manual input.
     result = runner.invoke(
         main,
-        ["init", "--account", "main", "--no-color"],
-        input="4\ny\ny\n1\n2\n3\n"
+        ["account", "edit", "main", "--no-color"],
+        input="2\ny\ny\n1\n2\n3\n"
         + TEST_COOKIE
         + "\n1\n1\n1\n"
         + ("1\n" if save else "2\n"),
@@ -583,7 +583,8 @@ def test_mock_account_end_user_command_transcript(
         (["zzz"], None),
         (["check-in", "--help"], None),
         (["check-in", "hsr"], None),
-        (["init"], "1\n2\ny\n1\n"),
+        (["init"], None),
+        (["account", "edit", "main"], "1\n1\n1\n1\n1\n"),
         (["config"], None),
     ]
     for arguments, answers in commands:
@@ -908,7 +909,7 @@ def test_unstyled_output(
 
 
 @pytest.mark.parametrize("source", ["manual", "browser"])
-def test_commented_config_survives_init(
+def test_commented_config_survives_account_edit(
     runner: CliRunner, acceptance_env: AcceptanceEnvironment, source: str
 ) -> None:
     original = acceptance_env.config.read_text()
@@ -935,8 +936,8 @@ def test_commented_config_survives_init(
             BrowserProfile("chrome", "chrome", "Library-selected profile"),
         )
         session_answers = "y\n2\n"
-    answers = "4\ny\n" + session_answers + "1\n1\n1\n1\n"
-    result = runner.invoke(main, ["init", "--account", "main"], input=answers)
+    answers = "2\ny\n" + session_answers + "1\n1\n1\n1\n"
+    result = runner.invoke(main, ["account", "edit", "main"], input=answers)
     assert result.exit_code == 0, result.output
     after = acceptance_env.config.read_text()
     assert '# Personal settings\ncustom = "retain-me" # unrelated\n' in after

@@ -28,7 +28,7 @@ def run_check_in(*, options: CommandOptions, game: GameId | None) -> None:
         raise CredentialError(
             f"No credentials for account {name}.",
             code=ErrorCode.CREDENTIALS_MISSING,
-            hint="Run: hoyo init",
+            hint="Run: hoyo account edit NAME",
         )
     try:
         gateway = GenshinPyGateway(credentials)

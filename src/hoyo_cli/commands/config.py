@@ -9,9 +9,20 @@ from pathlib import Path
 import click
 
 from hoyo_cli.commands import CommandOptions
+from hoyo_cli.commands.init import (
+    ClickSetupIO,
+    SetupIO,
+    choose_setup_option,
+    select_game_order,
+)
 from hoyo_cli.config.models import AppConfig, ordered_games, resolve_account
 from hoyo_cli.config.paths import config_path
-from hoyo_cli.config.repository import load_config
+from hoyo_cli.config.repository import (
+    commit_config,
+    load_config,
+    load_config_snapshot,
+    prepare_game_order,
+)
 from hoyo_cli.errors import AppError, ConfigError
 
 
@@ -43,9 +54,43 @@ def show_config(config: AppConfig, path: Path) -> str:
         if not any_enabled:
             lines.append("  No enabled games")
     lines.extend(
-        ["", "Run: hoyo init to change settings or update your HoYoLAB session."]
+        [
+            "",
+            "Add account: hoyo account add",
+            "Update account or session: hoyo account edit NAME",
+            "Switch default: hoyo account use NAME",
+            "Change game order: hoyo config order",
+        ]
     )
     return "\n".join(lines)
+
+
+def run_order(path: Path, io: SetupIO) -> None:
+    config, original = load_config_snapshot(path)
+    order = select_game_order(io, config)
+    prepared = prepare_game_order(path, order)
+    if prepared.original != original:
+        raise ConfigError(
+            "Configuration changed during game order selection.",
+            hint="Retry hoyo config order.",
+        )
+    click.echo("Review game order: " + ", ".join(order), color=False)
+    if (
+        choose_setup_option(io, "Save game order?", ("Save", "Cancel (no changes)"))
+        != "Save"
+    ):
+        raise click.Abort()
+    if prepared.content.encode("utf-8") != original:
+        commit_config(prepared)
+    click.echo("Game order: " + ", ".join(order), color=False)
+
+
+def configure_order() -> None:
+    try:
+        run_order(config_path(), ClickSetupIO())
+    except (click.Abort, KeyboardInterrupt):
+        click.echo("Game order cancelled; no changes saved.", color=False)
+        raise
 
 
 def _editor_arguments(editor: str) -> list[str]:

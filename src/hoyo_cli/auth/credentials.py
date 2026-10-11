@@ -122,7 +122,7 @@ def deserialize_credentials(raw: str) -> Credentials:
     except (ValueError, TypeError, CredentialError):
         raise CredentialError(
             "Stored credentials are invalid; repair or remove the keyring entry "
-            "before running hoyo init."
+            "before running hoyo account edit NAME."
         ) from None
 
 

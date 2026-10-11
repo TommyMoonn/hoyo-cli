@@ -583,7 +583,7 @@ def test_windows_brave_profiles_open_lock_closed_and_missing_login(
 @pytest.mark.skipif(
     sys.platform != "win32", reason="Requires Windows DPAPI/file sharing"
 )
-def test_windows_brave_lock_recovers_in_real_init_without_saving_on_cancel(
+def test_windows_brave_lock_recovers_in_account_edit_without_saving_on_cancel(
     runner: CliRunner,
     acceptance_env: AcceptanceEnvironment,
     monkeypatch: pytest.MonkeyPatch,
@@ -597,8 +597,8 @@ def test_windows_brave_lock_recovers_in_real_init_without_saving_on_cancel(
     with exclusive_windows_file(database):
         result = runner.invoke(
             main,
-            ["init", "--account", "main", "--no-color"],
-            input="4\ny\ny\n1\n1\n3\n" + TEST_COOKIE + "\n1\n1\n1\n2\n",
+            ["account", "edit", "main", "--no-color"],
+            input="2\ny\ny\n1\n1\n3\n" + TEST_COOKIE + "\n1\n1\n1\n2\n",
         )
     assert result.exit_code == 1, result.output
     assert "cookie database is locked" in result.stderr

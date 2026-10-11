@@ -58,7 +58,7 @@ def test_missing_credentials_has_specific_category_and_setup_hint(
     assert caught.value.code == "credentials_missing"
     assert not caught.value.retryable
     assert result.exit_code == 3
-    assert result.stderr.splitlines()[-1] == "Run: hoyo init"
+    assert result.stderr.splitlines()[-1] == "Run: hoyo account edit NAME"
     status_gateway.fetch_status.assert_not_called()
 
 
@@ -112,7 +112,7 @@ def test_known_boundary_error_uses_same_safe_format(
         result = runner.invoke(main, [command])
     assert result.exit_code == 3
     assert result.stderr.startswith("Error: HoYoLAB rejected the session.\nTry: ")
-    assert "hoyo init" in result.stderr and not result.stdout
+    assert "hoyo account edit NAME" in result.stderr and not result.stdout
 
 
 def test_help_identifies_hoyo(runner: CliRunner) -> None:
@@ -128,16 +128,12 @@ def test_help_connects_setup_settings_and_normal_commands(
     result = runner.invoke(main, [*command, "--help"])
     assert result.exit_code == 0
     if command == ["init"]:
-        for action in (
-            "Games and characters",
-            "Game order",
-            "Default account",
-            "Update HoYoLAB session",
-            "Credential storage",
-        ):
-            assert action in result.output
+        assert "first account" in result.output
+        assert "hoyo account edit NAME" in result.output
+        assert "Existing-account actions" not in result.output
     elif command == ["config"]:
-        assert "hoyo init" in result.output
+        assert "hoyo config order" in result.output
+        assert "hoyo account edit NAME" in result.output
     else:
         for example in (
             "hoyo init",

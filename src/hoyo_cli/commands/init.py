@@ -2,7 +2,7 @@
 
 import asyncio
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from functools import partial
 from pathlib import Path
 from typing import Literal, Protocol, TypeVar, cast
@@ -32,9 +32,8 @@ from hoyo_cli.config.models import (
 from hoyo_cli.config.paths import config_path, credentials_path
 from hoyo_cli.config.repository import (
     commit_config,
-    load_config,
+    load_config_snapshot,
     prepare_account,
-    prepare_default_account,
 )
 from hoyo_cli.errors import (
     AppError,
@@ -88,7 +87,7 @@ class ClickSetupIO:
         return click.prompt(prompt, hide_input=True, type=str)
 
 
-def _choose(io: SetupIO, prompt: str, choices: Sequence[str]) -> str:
+def choose_setup_option(io: SetupIO, prompt: str, choices: Sequence[str]) -> str:
     value = io.choose(prompt, choices)
     if choices and value not in choices:
         raise ConfigError("Invalid setup selection; no files were changed.")
@@ -104,22 +103,15 @@ def _confirm(io: SetupIO, prompt: str, *, default: bool = False) -> bool:
 
 
 def _account_name(io: SetupIO, config: AppConfig | None, requested: str | None) -> str:
-    if requested is not None:
-        if config is not None:
-            resolve_account(config, requested)
-        name = requested
-    elif config is None:
-        name = _new_account_name(io)
-    else:
-        create = "Create new account"
-        while create in config.accounts:
-            create += " (new)"
-        name = _choose(io, "Account", (*config.accounts, create))
-        if name == create:
-            name = _new_account_name(io)
+    name = requested if requested is not None else _new_account_name(io)
     if not _valid_account_name(name):
         raise ConfigError(
             "Account name must be non-empty and contain no control characters."
+        )
+    if config is not None and name in config.accounts:
+        raise ConfigError(
+            "An account with this exact name already exists.",
+            hint="Use hoyo account edit NAME to update an existing account.",
         )
     return name
 
@@ -130,12 +122,12 @@ def _valid_account_name(name: str) -> bool:
 
 def _new_account_name(io: SetupIO) -> str:
     while True:
-        name = _choose(io, "Account name", ())
+        name = choose_setup_option(io, "Account name", ())
         if _valid_account_name(name):
             return name
         click.echo("Account name must be non-empty and contain no control characters.")
         if (
-            _choose(
+            choose_setup_option(
                 io,
                 "Account recovery",
                 ("Enter account name again", "Cancel (no changes)"),
@@ -167,7 +159,9 @@ def _browser_profile(io: SetupIO, browser: BrowserImporter) -> BrowserProfile | 
     if not sessions:
         click.echo("No supported browser sources are available. Use manual input.")
         return None
-    selected = _choose(io, "HoYoLAB session", (*choices, "Paste Cookie header"))
+    selected = choose_setup_option(
+        io, "HoYoLAB session", (*choices, "Paste Cookie header")
+    )
     if selected == "Paste Cookie header":
         return None
     session = sessions[choices.index(selected)]
@@ -183,7 +177,9 @@ def _browser_profile(io: SetupIO, browser: BrowserImporter) -> BrowserProfile | 
         return profiles[0]
     # Tokens disambiguate equal profile names without displaying private paths.
     profile_choices = [f"{p.label} [{p.source_id}]" for p in profiles]
-    selected = _choose(io, "Browser profile", (*profile_choices, "Paste Cookie header"))
+    selected = choose_setup_option(
+        io, "Browser profile", (*profile_choices, "Paste Cookie header")
+    )
     if selected == "Paste Cookie header":
         return None
     return profiles[profile_choices.index(selected)]
@@ -282,7 +278,7 @@ def _session_recovery(io: SetupIO, *, use_browser: bool, has_credentials: bool) 
         )
     else:
         choices = ("Paste Cookie header again", "Change credential source")
-    return _choose(
+    return choose_setup_option(
         io,
         "Browser recovery" if use_browser else "Session recovery",
         (*choices, "Cancel (no changes)"),
@@ -292,7 +288,7 @@ def _session_recovery(io: SetupIO, *, use_browser: bool, has_credentials: bool) 
 def _backend(
     io: SetupIO, path: Path, name: str, presenter: SetupPresenter
 ) -> tuple[CredentialBackend, CredentialStore]:
-    backend = _choose(io, "Credential backend", ("keyring", "plaintext"))
+    backend = choose_setup_option(io, "Credential backend", ("keyring", "plaintext"))
     selected: CredentialBackend = "keyring" if backend == "keyring" else "plaintext"
     store = open_store(selected, path)
     try:
@@ -316,7 +312,7 @@ def _backend(
     return selected, store
 
 
-def _game_order(io: SetupIO, config: AppConfig | None) -> tuple[GameId, ...]:
+def select_game_order(io: SetupIO, config: AppConfig | None) -> tuple[GameId, ...]:
     prompt = (
         "Keep the current game display order?"
         if config
@@ -327,8 +323,8 @@ def _game_order(io: SetupIO, config: AppConfig | None) -> tuple[GameId, ...]:
     remaining = list(GAME_IDS)
     order: list[GameId] = []
     while remaining:
-        selected = _choose(io, "Next game in display order", remaining)
-        # _choose has validated membership in the remaining canonical IDs.
+        selected = choose_setup_option(io, "Next game in display order", remaining)
+        # choose_setup_option has validated membership in the remaining canonical IDs.
         game = cast(GameId, selected)
         order.append(game)
         remaining.remove(game)
@@ -341,7 +337,9 @@ def _character(
     characters: tuple[CharacterRef, ...],
 ) -> CharacterRef | None:
     choices = [character_choice(char) for char in characters]
-    selected = _choose(io, f"Character for {game}", (*choices, "Skip this game"))
+    selected = choose_setup_option(
+        io, f"Character for {game}", (*choices, "Skip this game")
+    )
     return None if selected == "Skip this game" else characters[choices.index(selected)]
 
 
@@ -400,10 +398,8 @@ def _require_enabled(games: dict[GameId, GameSelection]) -> None:
 class _SetupChanges:
     account: AccountConfig
     characters: dict[GameId, CharacterRef]
-    default_account: str
-    order: tuple[GameId, ...]
     secret_update: tuple[CredentialStore, Credentials] | None = None
-    default_only: bool = False
+    initial_order: tuple[GameId, ...] | None = None
 
 
 def _new_account(
@@ -425,10 +421,7 @@ def _new_account(
         configured_color=config.display_color if config else "auto",
     )
     games, characters = _select_games(io, presenter, name, discovered, None)
-    make_default = config is None or _confirm(
-        io, f"Use {name} as the default account?", default=True
-    )
-    order = _game_order(io, config)
+    order = select_game_order(io, None) if config is None else None
     presenter.step(3, "Storage", name)
     backend, store = _backend(io, credentials_file, name, presenter)
     if store.get(name) is not None:
@@ -437,9 +430,8 @@ def _new_account(
     return _SetupChanges(
         AccountConfig(backend, games),
         characters,
-        name if make_default or config is None else config.default_account,
-        order,
         (store, credentials),
+        order,
     )
 
 
@@ -451,7 +443,7 @@ def _saved_session(
         raise CredentialError(
             "No stored HoYoLAB session is available for this account.",
             code=ErrorCode.CREDENTIALS_MISSING,
-            hint="Run hoyo init and select Update HoYoLAB session.",
+            hint="Run hoyo account edit NAME and select Update HoYoLAB session.",
         )
     return credentials
 
@@ -483,7 +475,7 @@ def _edit_games(
         else:
             presenter.message("Not configured")
         choices.append("Choose linked character")
-        action = _choose(io, f"Game settings for {game}", choices)
+        action = choose_setup_option(io, f"Game settings for {game}", choices)
         if action == "Disable this game" and current:
             games[game] = GameSelection(False, current.uid)
         elif action == "Choose linked character":
@@ -502,7 +494,7 @@ def _edit_games(
                     f"No linked characters were found for {game} in the saved session.",
                     hint=(
                         "Keep this game disabled, or select Update HoYoLAB session "
-                        "in hoyo init."
+                        "in hoyo account edit NAME."
                     ),
                 )
             character = _character(io, game, linked)
@@ -526,13 +518,11 @@ def _existing_account(
     *,
     no_color: bool,
 ) -> _SetupChanges:
-    action = _choose(
+    action = choose_setup_option(
         io,
         "Account settings",
         (
             "Games and characters",
-            "Game order",
-            "Default account",
             "Update HoYoLAB session",
             "Credential storage",
             "Cancel (no changes)",
@@ -543,7 +533,6 @@ def _existing_account(
     presenter.message(f"Change: {action}")
     account = config.accounts[name]
     characters: dict[GameId, CharacterRef] = {}
-    default_account, order = config.default_account, config.game_order
     secret_update: tuple[CredentialStore, Credentials] | None = None
     if action == "Games and characters":
         games, characters = _edit_games(
@@ -556,21 +545,6 @@ def _existing_account(
             no_color=no_color,
         )
         account = AccountConfig(account.credential_backend, games)
-    elif action == "Game order":
-        order = _game_order(io, config)
-    elif action == "Default account":
-        default_account = _choose(
-            io,
-            "Default account",
-            (
-                config.default_account,
-                *(
-                    other
-                    for other in config.accounts
-                    if other != config.default_account
-                ),
-            ),
-        )
     elif action == "Update HoYoLAB session":
         if not io.confirm("Replace existing account credentials?"):
             raise click.Abort()
@@ -604,36 +578,92 @@ def _existing_account(
     return _SetupChanges(
         account,
         characters,
-        default_account,
-        order,
         secret_update,
-        default_only=action == "Default account",
     )
 
 
-def _run_init(
+def _load_setup_config(config_file: Path) -> tuple[AppConfig | None, bytes | None]:
+    try:
+        return load_config_snapshot(config_file)
+    except ConfigError as error:
+        if error.code != ErrorCode.CONFIG_MISSING:
+            raise
+        return None, None
+
+
+def _initialized_guidance() -> None:
+    click.echo(
+        "HoYo CLI is already set up.\n"
+        "Add:      hoyo account add\n"
+        "Update:   hoyo account edit NAME\n"
+        "Switch:   hoyo account use NAME\n"
+        "Settings: hoyo config",
+        color=False,
+    )
+
+
+def _validate_entrypoint(
+    config: AppConfig | None, mode: Literal["first", "add", "edit"], name: str | None
+) -> None:
+    if mode == "first" and name is not None:
+        raise ConfigError(
+            "hoyo init does not accept an account override.",
+            hint="Run hoyo account edit NAME to update an existing account.",
+        )
+    if mode != "first" and config is None:
+        raise ConfigError(
+            "Configuration file not found.",
+            code=ErrorCode.CONFIG_MISSING,
+            hint="Run: hoyo init",
+        )
+    if config is not None and mode == "edit":
+        if name is None:
+            raise ConfigError(
+                "An exact account name is required.", hint="Run: hoyo account"
+            )
+        try:
+            resolve_account(config, name)
+        except ConfigError:
+            raise ConfigError(
+                "Unknown account name; names must match exactly.",
+                hint="Run: hoyo account",
+            ) from None
+    if config is not None and mode == "add" and name in config.accounts:
+        raise ConfigError(
+            "An account with this exact name already exists.",
+            hint="Use hoyo account edit NAME to update an existing account.",
+        )
+
+
+def _run_setup(
     config_file: Path,
     credentials_file: Path,
     io: SetupIO,
     browser: BrowserImporter,
     discovery: CharacterDiscovery,
     *,
+    mode: Literal["first", "add", "edit"],
     requested_account: str | None = None,
     no_color: bool = False,
-) -> str:
-    config = load_config(config_file) if config_file.exists() else None
+) -> str | None:
+    config, original = _load_setup_config(config_file)
+    _validate_entrypoint(config, mode, requested_account)
+    if mode == "first" and config is not None:
+        _initialized_guidance()
+        return None
     presenter = SetupPresenter(
         no_color=no_color, configured_color=config.display_color if config else "auto"
     )
-    if config is None:
-        presenter.step(1, "Account")
+    existing = mode == "edit"
+    if existing:
+        presenter.message("Edit account")
+        assert config is not None and requested_account is not None
+        name = requested_account
     else:
-        presenter.message("Account setup and settings")
-    name = _account_name(io, config, requested_account)
+        presenter.message("First account setup" if mode == "first" else "Add account")
+        presenter.step(1, "Account")
+        name = _account_name(io, config, requested_account)
     presenter.message(f"Account: {name}")
-    existing = config is not None and name in config.accounts
-    if config is not None and not existing:
-        presenter.step(1, "Account", name)
     changes = (
         _existing_account(
             io,
@@ -657,28 +687,30 @@ def _run_init(
             no_color=no_color,
         )
     )
-    prepared = (
-        prepare_default_account(config_file, changes.default_account)
-        if changes.default_only
-        else prepare_account(
-            config_file,
-            name,
-            changes.account,
-            make_default=changes.default_account == name,
-            game_order=changes.order,
-        )
+    prepared = prepare_account(
+        config_file,
+        name,
+        changes.account,
+        make_default=config is None,
+        game_order=changes.initial_order,
     )
+    recovery = (
+        "Retry hoyo init." if mode == "first" else f"Retry hoyo account {mode} NAME."
+    )
+    prepared = replace(prepared, conflict_hint=recovery)
+    if prepared.original != original:
+        raise ConfigError("Configuration changed during setup.", hint=recovery)
     presenter.review(
         name=name,
         games=changes.account.games,
         characters=changes.characters,
         backend=changes.account.credential_backend,
-        default_account=changes.default_account,
-        order=changes.order,
+        default_account=config.default_account if config else name,
+        order=config.game_order if config else changes.initial_order or GAME_IDS,
         staged=not existing,
     )
     if (
-        _choose(
+        choose_setup_option(
             io,
             "Save account configuration and credentials?"
             if changes.secret_update
@@ -708,6 +740,35 @@ def _run_init(
     return name
 
 
+def _run_account_setup(
+    config_file: Path,
+    credentials_file: Path,
+    io: SetupIO,
+    browser: BrowserImporter,
+    discovery: CharacterDiscovery,
+    *,
+    mode: Literal["first", "add", "edit"],
+    requested_account: str | None = None,
+    no_color: bool = False,
+) -> None:
+    try:
+        name = _run_setup(
+            config_file,
+            credentials_file,
+            io,
+            browser,
+            discovery,
+            mode=mode,
+            requested_account=requested_account,
+            no_color=no_color,
+        )
+    except (click.Abort, KeyboardInterrupt, asyncio.CancelledError):
+        click.echo("Setup cancelled; no changes saved.", color=False)
+        raise
+    if name is not None:
+        click.echo(f"Configured account {name}. Run hoyo to continue.", color=False)
+
+
 def run_init(
     config_file: Path,
     credentials_file: Path,
@@ -718,33 +779,93 @@ def run_init(
     requested_account: str | None = None,
     no_color: bool = False,
 ) -> None:
-    try:
-        name = _run_init(
-            config_file,
-            credentials_file,
-            io,
-            browser,
-            discovery,
-            requested_account=requested_account,
-            no_color=no_color,
-        )
-    except (click.Abort, KeyboardInterrupt, asyncio.CancelledError):
-        click.echo("Setup cancelled; no changes saved.", color=False)
-        raise
-    click.echo(f"Configured account {name}. Run hoyo to continue.", color=False)
+    _run_account_setup(
+        config_file,
+        credentials_file,
+        io,
+        browser,
+        discovery,
+        mode="first",
+        requested_account=requested_account,
+        no_color=no_color,
+    )
 
 
-def configure_account(*, options: CommandOptions) -> None:
+def run_add_account(
+    config_file: Path,
+    credentials_file: Path,
+    io: SetupIO,
+    browser: BrowserImporter,
+    discovery: CharacterDiscovery,
+    *,
+    requested_account: str | None = None,
+    no_color: bool = False,
+) -> None:
+    _run_account_setup(
+        config_file,
+        credentials_file,
+        io,
+        browser,
+        discovery,
+        mode="add",
+        requested_account=requested_account,
+        no_color=no_color,
+    )
+
+
+def run_edit_account(
+    config_file: Path,
+    credentials_file: Path,
+    io: SetupIO,
+    browser: BrowserImporter,
+    discovery: CharacterDiscovery,
+    *,
+    requested_account: str,
+    no_color: bool = False,
+) -> None:
+    _run_account_setup(
+        config_file,
+        credentials_file,
+        io,
+        browser,
+        discovery,
+        mode="edit",
+        requested_account=requested_account,
+        no_color=no_color,
+    )
+
+
+def configure_account(
+    *,
+    options: CommandOptions,
+    mode: Literal["first", "add", "edit"] = "first",
+    name: str | None = None,
+) -> None:
     try:
-        run_init(
+        config, _ = _load_setup_config(config_path())
+        requested = options.account if mode == "first" else name
+        _validate_entrypoint(config, mode, requested)
+        if mode == "first" and config is not None:
+            _initialized_guidance()
+            return
+        components = (
             config_path(),
             credentials_path(),
             ClickSetupIO(),
             SystemBrowserImporter(),
             HoYoLABDiscovery(),
-            requested_account=options.account,
-            no_color=options.no_color,
         )
+        if mode == "edit":
+            assert requested is not None
+            run_edit_account(
+                *components, requested_account=requested, no_color=options.no_color
+            )
+        elif mode == "add":
+            run_add_account(
+                *components, requested_account=requested, no_color=options.no_color
+            )
+        else:
+            run_init(*components, no_color=options.no_color)
     except (AppError, click.Abort):
         raise
     except Exception:

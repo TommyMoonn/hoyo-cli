@@ -42,10 +42,6 @@ def _read_snapshot(path: Path) -> tuple[TOMLDocument, bytes]:
         ) from None
 
 
-def _read_document(path: Path) -> TOMLDocument:
-    return _read_snapshot(path)[0]
-
-
 def _validate(document: TOMLDocument, path: Path) -> AppConfig:
     try:
         return parse_config(document)
@@ -56,7 +52,13 @@ def _validate(document: TOMLDocument, path: Path) -> AppConfig:
 
 
 def load_config(path: Path) -> AppConfig:
-    return _validate(_read_document(path), path)
+    return load_config_snapshot(path)[0]
+
+
+def load_config_snapshot(path: Path) -> tuple[AppConfig, bytes]:
+    """Read validated settings and their exact transaction baseline together."""
+    document, original = _read_snapshot(path)
+    return _validate(document, path), original
 
 
 def _ensure_table(
@@ -128,7 +130,7 @@ class PreparedConfig:
     path: Path
     content: str
     original: bytes | None
-    conflict_hint: str = "Rerun hoyo init."
+    conflict_hint: str = "Retry the account or config command."
 
 
 def prepare_default_account(path: Path, name: str) -> PreparedConfig:
@@ -157,7 +159,7 @@ def prepare_account(
     account: AccountConfig,
     *,
     make_default: bool,
-    game_order: tuple[GameId, ...],
+    game_order: tuple[GameId, ...] | None = None,
 ) -> PreparedConfig:
     _reject_symlink(path)
     if path.exists():
@@ -168,12 +170,15 @@ def prepare_account(
         document = tomlkit.document()
         document["version"] = 1
         document["default_account"] = name
-        document["game_order"] = list(game_order)
+        document["game_order"] = list(
+            game_order if game_order is not None else GAME_IDS
+        )
         document["display"] = tomlkit.table().add("color", "auto")
 
     if make_default:
         _set_field(document, "default_account", name)
-    _set_field(document, "game_order", list(game_order))
+    if game_order is not None:
+        _set_field(document, "game_order", list(game_order))
     accounts = _ensure_table(document, "accounts")
     selected = _ensure_table(accounts, name)
     _set_field(selected, "credential_backend", account.credential_backend)
@@ -190,6 +195,19 @@ def prepare_account(
     content = tomlkit.dumps(document)
     _validate(tomlkit.parse(content), path)
     return PreparedConfig(path, content, original)
+
+
+def prepare_game_order(path: Path, order: tuple[GameId, ...]) -> PreparedConfig:
+    """Prepare only the global game order, retaining all other TOML fields."""
+    _reject_symlink(path)
+    document, original = _read_snapshot(path)
+    _validate(document, path)
+    _set_field(document, "game_order", list(order))
+    content = tomlkit.dumps(document)
+    _validate(tomlkit.parse(content), path)
+    return PreparedConfig(
+        path, content, original, conflict_hint="Retry hoyo config order."
+    )
 
 
 def commit_config(prepared: PreparedConfig) -> None:

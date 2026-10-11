@@ -84,11 +84,14 @@ def main(
 
     \b
     Common commands:
-      hoyo init          Set up an account or change settings.
+      hoyo init          Set up the first account.
+      hoyo account add [NAME]  Add a new account without switching defaults.
+      hoyo account edit NAME   Update one existing account.
       hoyo               Show all enabled games.
       hoyo genshin       Show one game's status.
       hoyo check-in zzz  Claim daily rewards for one game.
       hoyo config        Inspect selections, including disabled games.
+      hoyo config order  Change the global game display order.
       hoyo account       List accounts and mark the saved default.
       hoyo account use NAME  Change the persistent default account.
     """
@@ -102,7 +105,7 @@ def main(
 @main.group(name="account", invoke_without_command=True)
 @click.pass_context
 def account_command(ctx: click.Context) -> None:
-    """List accounts or change the persistent default with use NAME.
+    """List accounts, add/edit an account, or save the default with use NAME.
 
     Listing and switching do not access credentials or contact HoYoLAB.
     --account on status/check-in selects an account for one invocation only.
@@ -116,6 +119,37 @@ def account_command(ctx: click.Context) -> None:
 def account_use_command(name: str) -> None:
     """Save NAME as the default for future commands. Names must match exactly."""
     account.use_account(name)
+
+
+@account_command.command(name="add")
+@click.argument("name", metavar="[NAME]", required=False)
+@click.option("--no-color", is_flag=True, help="Disable terminal styling.")
+@click.pass_context
+def account_add_command(ctx: click.Context, name: str | None, no_color: bool) -> None:
+    """Add a new account; prompt for NAME when omitted. Keep the saved default."""
+    init.configure_account(
+        options=_resolve_options(ctx, account=None, no_color=no_color),
+        mode="add",
+        name=name,
+    )
+
+
+@account_command.command(name="edit")
+@click.argument("name", metavar="NAME")
+@click.option("--no-color", is_flag=True, help="Disable terminal styling.")
+@click.pass_context
+def account_edit_command(ctx: click.Context, name: str, no_color: bool) -> None:
+    """Edit NAME's games/characters, HoYoLAB session, or credential storage.
+
+    Names must match exactly. Character changes reuse the saved session.
+    Review before Save; Cancel leaves files unchanged. Global preferences
+    belong to hoyo config; default switching belongs to hoyo account use NAME.
+    """
+    init.configure_account(
+        options=_resolve_options(ctx, account=None, no_color=no_color),
+        mode="edit",
+        name=name,
+    )
 
 
 @main.command(name="status")
@@ -186,28 +220,27 @@ def check_in_command(
 
 
 @main.command(name="init")
-@_common_options()
+@click.option(
+    "--account",
+    metavar="NAME",
+    help="Unsupported for init; use hoyo account edit NAME.",
+)
+@click.option("--no-color", is_flag=True, help="Disable terminal styling.")
 @click.pass_context
 def init_command(ctx: click.Context, account: str | None, no_color: bool) -> None:
-    """Set up or reconfigure an account interactively.
+    """Set up the first account interactively.
 
-    \b
-    Existing-account actions:
-      Games and characters  Keep or disable games locally; verify new UIDs.
-      Game order            Change display order without reading secrets.
-      Default account       Choose an account without reading secrets.
-      Update HoYoLAB session  Explicitly replace imported or pasted cookies.
-      Credential storage    Explicitly copy the saved session to a backend.
-
-    Character changes use the saved session for discovery without re-saving it.
-    All changes are reviewed before Save; Cancel leaves files unchanged.
+    Once initialized, show account/config command guidance without changes.
+    Use hoyo account add to add an account, hoyo account edit NAME to update
+    one, and hoyo config order to change global game order.
+    --account is rejected; use hoyo account edit NAME for existing accounts.
     """
     init.configure_account(
         options=_resolve_options(ctx, account=account, no_color=no_color)
     )
 
 
-@main.command(name="config")
+@main.group(name="config", invoke_without_command=True)
 @click.option("--edit", is_flag=True, help="Open the config in the configured editor.")
 @_common_options()
 @click.pass_context
@@ -217,8 +250,19 @@ def config_command(
     """Inspect non-secret configuration, or open it with --edit.
 
     Shows enabled, disabled, and unconfigured games without reading secrets.
-    Run hoyo init to change settings, characters, session, or credential storage.
+    Use hoyo config order for global order and hoyo account edit NAME for
+    characters, session, or credential storage.
     """
+    if ctx.invoked_subcommand is not None:
+        if edit:
+            raise click.UsageError("Use hoyo config --edit without a subcommand.")
+        return
     config.run_config(
         options=_resolve_options(ctx, account=account, no_color=no_color), edit=edit
     )
+
+
+@config_command.command(name="order")
+def config_order_command() -> None:
+    """Change only the global game display order, then review and save."""
+    config.configure_order()

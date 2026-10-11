@@ -17,6 +17,8 @@ def list_accounts() -> None:
         marker = "  Default" if name == config.default_account else ""
         click.echo(f"  {name}{marker}")
     click.echo("\nSwitch default: hoyo account use NAME")
+    click.echo("Add account:    hoyo account add")
+    click.echo("Edit account:   hoyo account edit NAME")
 
 
 def use_account(name: str) -> None:

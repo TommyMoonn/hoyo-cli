@@ -15,6 +15,7 @@ from tomlkit.toml_document import TOMLDocument
 
 from hoyo_cli.cli import main
 from hoyo_cli.commands.config import edit_config, show_config
+from hoyo_cli.config import repository
 from hoyo_cli.config.models import (
     AccountConfig,
     GameSelection,
@@ -23,7 +24,12 @@ from hoyo_cli.config.models import (
     resolve_account,
 )
 from hoyo_cli.config.paths import cache_root, config_path, credentials_path
-from hoyo_cli.config.repository import load_config, save_account
+from hoyo_cli.config.repository import (
+    commit_config,
+    load_config,
+    prepare_game_order,
+    save_account,
+)
 from hoyo_cli.errors import ConfigError
 from hoyo_cli.models.common import GameId
 
@@ -35,6 +41,78 @@ def test_save_refuses_detected_symlink_before_io(tmp_path: Path) -> None:
         with pytest.raises(ConfigError, match="symbolic link"):
             save_account(path, "main", account, make_default=True, game_order=())
     assert not path.exists()
+
+
+@pytest.mark.parametrize("line_ending", [b"\n", b"\r\n"])
+def test_order_transaction_changes_only_order_and_preserves_comments(
+    tmp_path: Path, config_document: TOMLDocument, line_ending: bytes
+) -> None:
+    path = tmp_path / "config.toml"
+    original = (
+        tomlkit.dumps(config_document)
+        .replace(
+            'game_order = ["zzz", "genshin"]',
+            'game_order = ["zzz", "genshin"] # display order',
+        )
+        .encode()
+        .replace(b"\n", line_ending)
+    )
+    path.write_bytes(original)
+    prepared = prepare_game_order(path, ("hsr", "zzz", "genshin"))
+    assert path.read_bytes() == original
+    assert prepared.original == original
+    commit_config(prepared)
+    assert path.read_bytes() == original.replace(
+        b'game_order = ["zzz", "genshin"]', b'game_order = ["hsr", "zzz", "genshin"]'
+    )
+
+
+@pytest.mark.parametrize("order", [("zzz", "zzz"), ("unknown",)])
+def test_invalid_order_candidate_is_rejected_before_writing(
+    tmp_path: Path, config_document: TOMLDocument, order: tuple[str, ...]
+) -> None:
+    path = tmp_path / "config.toml"
+    original = tomlkit.dumps(config_document).encode()
+    path.write_bytes(original)
+    with pytest.raises(ConfigError):
+        prepare_game_order(path, cast(tuple[GameId, ...], order))
+    assert path.read_bytes() == original
+
+
+@pytest.mark.parametrize("failure", [OSError, KeyboardInterrupt])
+@pytest.mark.parametrize("operation", ["fsync", "replace"])
+def test_interrupted_order_write_retains_exact_original_and_cleans_temporary_file(
+    tmp_path: Path,
+    config_document: TOMLDocument,
+    failure: type[BaseException],
+    operation: str,
+) -> None:
+    path = tmp_path / "config.toml"
+    original = tomlkit.dumps(config_document).encode()
+    path.write_bytes(original)
+    prepared = prepare_game_order(path, ("hsr", "zzz", "genshin"))
+    with patch.object(repository.os, operation, side_effect=failure("private-marker")):
+        with pytest.raises(ConfigError if failure is OSError else KeyboardInterrupt):
+            commit_config(prepared)
+    assert path.read_bytes() == original
+    assert list(tmp_path.iterdir()) == [path]
+
+
+@pytest.mark.parametrize("stage", ["prepare", "commit"])
+def test_order_transaction_refuses_detected_symlink(
+    tmp_path: Path, config_document: TOMLDocument, stage: str
+) -> None:
+    path = tmp_path / "config.toml"
+    original = tomlkit.dumps(config_document).encode()
+    path.write_bytes(original)
+    prepared = prepare_game_order(path, ("hsr", "zzz", "genshin"))
+    with patch.object(Path, "is_symlink", return_value=True):
+        with pytest.raises(ConfigError, match="symbolic link"):
+            if stage == "prepare":
+                prepare_game_order(path, ("hsr", "zzz", "genshin"))
+            else:
+                commit_config(prepared)
+    assert path.read_bytes() == original
 
 
 @pytest.mark.parametrize("dangling", [False, True])
@@ -387,7 +465,7 @@ def test_config_shows_paths_names_and_uids_not_secrets(
     assert "ltoken" not in output
     assert "zzz: disabled, UID 333333333" in output
     assert "genshin: not configured" in output
-    assert "Run: hoyo init" in output
+    assert "hoyo config order" in output and "hoyo account edit NAME" in output
 
 
 @pytest.mark.parametrize("width", [48, 70, 100])
@@ -415,7 +493,10 @@ def test_config_inspection_preserves_long_names_and_disabled_selections_without_
     assert f"Account: {name}" in result.output
     assert "zzz: disabled, UID 333333333" in result.output
     assert "hsr: not configured" in result.output
-    assert "Run: hoyo init" in result.output
+    assert (
+        "hoyo config order" in result.output
+        and "hoyo account edit NAME" in result.output
+    )
     assert "private-marker" not in result.output and "\x1b" not in result.output
     store.assert_not_called()
     keyring_get.assert_not_called()
