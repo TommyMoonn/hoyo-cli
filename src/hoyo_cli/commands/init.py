@@ -45,6 +45,7 @@ from hoyo_cli.hoyolab.discovery import (
 from hoyo_cli.models.common import GAME_IDS, GameId
 from hoyo_cli.render.errors import format_error
 from hoyo_cli.render.progress import OperationProgress
+from hoyo_cli.render.setup import SetupPresenter, character_choice
 
 _Result = TypeVar("_Result")
 
@@ -56,19 +57,26 @@ class SetupIO(Protocol):
 
 
 class ClickSetupIO:
+    def __init__(self) -> None:
+        self.presenter = SetupPresenter(no_color=True)
+
     def choose(self, prompt: str, choices: Sequence[str]) -> str:
         if not choices:
             return click.prompt(prompt, type=str)
         for index, choice in enumerate(choices, 1):
-            click.echo(f"  {index}. {choice}", color=False)
-        click.echo(f"  {len(choices) + 1}. Cancel setup", color=False)
-        index = click.prompt(prompt, type=click.IntRange(1, len(choices) + 1))
-        if index == len(choices) + 1:
+            self.presenter.message(f"  {index}. {choice}")
+        cancel = "Cancel (no changes)"
+        has_cancel = cancel in choices
+        maximum = len(choices) if has_cancel else len(choices) + 1
+        if not has_cancel:
+            self.presenter.message(f"  {maximum}. {cancel}")
+        index = click.prompt(prompt, type=click.IntRange(1, maximum), default=1)
+        if not has_cancel and index == maximum:
             raise click.Abort()
         return choices[index - 1]
 
-    def confirm(self, prompt: str) -> bool:
-        return click.confirm(prompt, default=False)
+    def confirm(self, prompt: str, *, default: bool = False) -> bool:
+        return click.confirm(prompt, default=default)
 
     def secret(self, prompt: str) -> str:
         return click.prompt(prompt, hide_input=True, type=str)
@@ -81,25 +89,54 @@ def _choose(io: SetupIO, prompt: str, choices: Sequence[str]) -> str:
     return value
 
 
+def _confirm(io: SetupIO, prompt: str, *, default: bool = False) -> bool:
+    # Existing SetupIO implementations keep their one-argument contract. Only
+    # the terminal adapter needs to implement the Enter-key default policy.
+    if isinstance(io, ClickSetupIO):
+        return io.confirm(prompt, default=default)
+    return io.confirm(prompt)
+
+
 def _account_name(io: SetupIO, config: AppConfig | None, requested: str | None) -> str:
     if requested is not None:
         if config is not None:
             resolve_account(config, requested)
         name = requested
     elif config is None:
-        name = _choose(io, "Account name", ())
+        name = _new_account_name(io)
     else:
         create = "Create new account"
         while create in config.accounts:
             create += " (new)"
         name = _choose(io, "Account", (*config.accounts, create))
         if name == create:
-            name = _choose(io, "Account name", ())
-    if not name.strip() or any(ord(c) < 32 or ord(c) == 127 for c in name):
+            name = _new_account_name(io)
+    if not _valid_account_name(name):
         raise ConfigError(
             "Account name must be non-empty and contain no control characters."
         )
     return name
+
+
+def _valid_account_name(name: str) -> bool:
+    return bool(name.strip()) and not any(ord(c) < 32 or ord(c) == 127 for c in name)
+
+
+def _new_account_name(io: SetupIO) -> str:
+    while True:
+        name = _choose(io, "Account name", ())
+        if _valid_account_name(name):
+            return name
+        click.echo("Account name must be non-empty and contain no control characters.")
+        if (
+            _choose(
+                io,
+                "Account recovery",
+                ("Enter account name again", "Cancel (no changes)"),
+            )
+            == "Cancel (no changes)"
+        ):
+            raise click.Abort()
 
 
 def _observed_work(
@@ -157,20 +194,25 @@ def _session(
     use_browser = io.confirm("Import a HoYoLAB session from supported browsers?")
     profile: BrowserProfile | None = None
     credentials: Credentials | None = None
-    while use_browser:
+    while True:
         try:
-            if profile is None:
+            if use_browser and profile is None:
                 profile = _browser_profile(io, browser)
                 if profile is None:
-                    break
+                    use_browser = False
             if credentials is None:
-                credentials = _observed_work(
-                    "browser_read",
-                    partial(browser.import_session, profile.source_id),
-                    no_color=no_color,
-                    configured_color=configured_color,
-                )
-                click.echo("Cookies found. Verifying HoYoLAB session.", color=False)
+                if use_browser and profile is not None:
+                    credentials = _observed_work(
+                        "browser_read",
+                        partial(browser.import_session, profile.source_id),
+                        no_color=no_color,
+                        configured_color=configured_color,
+                    )
+                    click.echo("Cookies found. Verifying HoYoLAB session.", color=False)
+                else:
+                    credentials = parse_cookie_header(
+                        io.secret("Full HoYoLAB Cookie header (hidden)")
+                    )
             discovered = _observed_work(
                 "session_verify",
                 partial(discovery.discover, credentials),
@@ -178,8 +220,9 @@ def _session(
                 configured_color=configured_color,
             )
             click.echo("Session verified.", color=False)
-            return credentials, discovered
         except ConfigError:
+            # Forged menu values or invalid adapter configuration are not a
+            # recoverable session failure.
             raise
         except AppError as error:
             # Verification failures retain their classified cause. Unexpected
@@ -187,40 +230,61 @@ def _session(
             if error.code == ErrorCode.UNEXPECTED:
                 raise
             click.echo(format_error(error), err=True, color=False)
-        retry = (
-            "Retry session verification"
-            if credentials is not None
-            else "Retry browser import"
-        )
-        recovery = _choose(
-            io,
-            "Browser recovery",
-            (
-                retry,
-                "Choose another browser/profile",
-                "Paste Cookie header",
-                "Cancel (no changes)",
-            ),
+        else:
+            if any(discovered.values()):
+                return credentials, discovered
+            click.echo(
+                format_error(
+                    ConfigError(
+                        "No supported linked game characters were found "
+                        "on this HoYoLAB account.",
+                        hint="Retry discovery or choose a session with linked games.",
+                    )
+                ),
+                err=True,
+                color=False,
+            )
+        recovery = _session_recovery(
+            io, use_browser=use_browser, has_credentials=credentials is not None
         )
         if recovery == "Cancel (no changes)":
             raise click.Abort()
         if recovery == "Paste Cookie header":
-            break
+            use_browser, profile, credentials = False, None, None
         if recovery == "Choose another browser/profile":
             profile, credentials = None, None
-    credentials = parse_cookie_header(io.secret("Full HoYoLAB Cookie header (hidden)"))
-    discovered = _observed_work(
-        "session_verify",
-        lambda: discovery.discover(credentials),
-        no_color=no_color,
-        configured_color=configured_color,
+        if recovery == "Paste Cookie header again":
+            credentials = None
+        if recovery == "Change credential source":
+            use_browser = io.confirm(
+                "Import a HoYoLAB session from supported browsers?"
+            )
+            profile, credentials = None, None
+
+
+def _session_recovery(io: SetupIO, *, use_browser: bool, has_credentials: bool) -> str:
+    if use_browser:
+        retry = (
+            "Retry session verification" if has_credentials else "Retry browser import"
+        )
+        choices = (retry, "Choose another browser/profile", "Paste Cookie header")
+    elif has_credentials:
+        choices = (
+            "Retry session verification",
+            "Change credential source",
+            "Paste Cookie header again",
+        )
+    else:
+        choices = ("Paste Cookie header again", "Change credential source")
+    return _choose(
+        io,
+        "Browser recovery" if use_browser else "Session recovery",
+        (*choices, "Cancel (no changes)"),
     )
-    click.echo("Session verified.", color=False)
-    return credentials, discovered
 
 
 def _backend(
-    io: SetupIO, path: Path, name: str
+    io: SetupIO, path: Path, name: str, presenter: SetupPresenter
 ) -> tuple[CredentialBackend, CredentialStore]:
     backend = _choose(io, "Credential backend", ("keyring", "plaintext"))
     selected: CredentialBackend = "keyring" if backend == "keyring" else "plaintext"
@@ -236,11 +300,10 @@ def _backend(
         store = open_store(selected, path)
         store.get(name)
     if selected == "plaintext":
-        click.echo(
+        presenter.message(
             f"Warning: {path} will contain account credentials in plaintext. "
             "User-only permissions are requested; "
             "Windows uses inherited directory ACLs.",
-            color=False,
         )
         if not io.confirm("Accept plaintext credential storage?"):
             raise click.Abort()
@@ -248,8 +311,13 @@ def _backend(
 
 
 def _game_order(io: SetupIO, config: AppConfig | None) -> tuple[GameId, ...]:
-    if config is not None and io.confirm("Keep the current game display order?"):
-        return config.game_order
+    prompt = (
+        "Keep the current game display order?"
+        if config
+        else "Use the default game display order?"
+    )
+    if _confirm(io, prompt, default=True):
+        return config.game_order if config else GAME_IDS
     remaining = list(GAME_IDS)
     order: list[GameId] = []
     while remaining:
@@ -261,7 +329,7 @@ def _game_order(io: SetupIO, config: AppConfig | None) -> tuple[GameId, ...]:
     return tuple(order)
 
 
-def run_init(
+def _run_init(
     config_file: Path,
     credentials_file: Path,
     io: SetupIO,
@@ -270,9 +338,14 @@ def run_init(
     *,
     requested_account: str | None = None,
     no_color: bool = False,
-) -> None:
+) -> str:
     config = load_config(config_file) if config_file.exists() else None
+    presenter = SetupPresenter(
+        no_color=no_color, configured_color=config.display_color if config else "auto"
+    )
+    presenter.step(1, "Account")
     name = _account_name(io, config, requested_account)
+    presenter.message(f"Account: {name}")
     previous = config.accounts.get(name) if config is not None else None
     if previous is not None and not io.confirm("Replace existing account credentials?"):
         raise click.Abort()
@@ -283,10 +356,7 @@ def run_init(
         no_color=no_color,
         configured_color=config.display_color if config else "auto",
     )
-    if not any(discovered.values()):
-        raise ConfigError(
-            "No supported linked game characters were found on this HoYoLAB account."
-        )
+    presenter.step(2, "Games", name)
     # A retained UID is recovery metadata, not evidence of ownership by the
     # selected session. Only a current discovery choice may enable a game.
     games: dict[GameId, GameSelection] = (
@@ -297,9 +367,12 @@ def run_init(
         if previous is not None
         else {}
     )
+    selected_characters: dict[GameId, CharacterRef] = {}
     for game in GAME_IDS:
+        presenter.game(game)
         characters = discovered.get(game, ())
         if not characters:
+            presenter.message("No linked characters; this game will stay disabled.")
             prior = previous.games.get(game) if previous is not None else None
             if prior is not None and prior.enabled:
                 click.echo(
@@ -308,17 +381,24 @@ def run_init(
                     color=False,
                 )
             continue
-        choices = [
-            f"{char.label} | UID {char.uid} | {char.region}" for char in characters
-        ]
-        selected = _choose(io, f"Character for {game}", choices)
+        choices = [character_choice(char) for char in characters]
+        selected = _choose(io, f"Character for {game}", (*choices, "Skip this game"))
+        if selected == "Skip this game":
+            continue
         character = characters[choices.index(selected)]
-        games[game] = GameSelection(io.confirm(f"Enable {game}?"), character.uid)
+        selected_characters[game] = character
+        games[game] = GameSelection(True, character.uid)
     if not any(selection.enabled for selection in games.values()):
         raise ConfigError("Select at least one enabled game; no files were changed.")
-    make_default = config is None or io.confirm(f"Use {name} as the default account?")
+    make_default = config is None or _confirm(
+        io, f"Use {name} as the default account?", default=True
+    )
     order = _game_order(io, config)
-    backend, store = _backend(io, credentials_file, name)
+    presenter.step(3, "Storage", name)
+    backend, store = _backend(io, credentials_file, name, presenter)
+    if previous is not None and backend != previous.credential_backend:
+        if not io.confirm("Change this account's credential backend?"):
+            raise click.Abort()
     if previous is None and store.get(name) is not None:
         if not io.confirm("Replace existing stored credentials for this account name?"):
             raise click.Abort()
@@ -329,7 +409,24 @@ def run_init(
         make_default=make_default,
         game_order=order,
     )
-    if not io.confirm("Save account configuration and credentials?"):
+    presenter.review(
+        name=name,
+        games=games,
+        characters=selected_characters,
+        backend=backend,
+        default_account=name
+        if make_default or config is None
+        else config.default_account,
+        order=order,
+    )
+    if (
+        _choose(
+            io,
+            "Save account configuration and credentials?",
+            ("Save", "Cancel (no changes)"),
+        )
+        != "Save"
+    ):
         raise click.Abort()
     restore = store.checkpoint(name)
     try:
@@ -343,6 +440,32 @@ def run_init(
                 "Setup failed and credential rollback failed. Config was not saved. "
                 "Repair the selected credential backend before retrying."
             ) from None
+        raise
+    return name
+
+
+def run_init(
+    config_file: Path,
+    credentials_file: Path,
+    io: SetupIO,
+    browser: BrowserImporter,
+    discovery: CharacterDiscovery,
+    *,
+    requested_account: str | None = None,
+    no_color: bool = False,
+) -> None:
+    try:
+        name = _run_init(
+            config_file,
+            credentials_file,
+            io,
+            browser,
+            discovery,
+            requested_account=requested_account,
+            no_color=no_color,
+        )
+    except (click.Abort, KeyboardInterrupt, asyncio.CancelledError):
+        click.echo("Setup cancelled; no changes saved.", color=False)
         raise
     click.echo(f"Configured account {name}. Run hoyo to continue.", color=False)
 

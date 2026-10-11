@@ -29,6 +29,7 @@ from hoyo_cli.errors import (
     BrowserImportError,
     CredentialError,
     ErrorCode,
+    NetworkError,
 )
 from hoyo_cli.hoyolab.client import fetch_linked_accounts
 from hoyo_cli.hoyolab.discovery import CharacterRef, discover_characters
@@ -137,12 +138,9 @@ def test_cli_init_hidden_cookie_and_config_inspection(
     tmp_path: Path, runner: CliRunner
 ) -> None:
     config, secrets = tmp_path / "config.toml", tmp_path / "credentials.toml"
-    # Account; decline browser; hidden cookie; select/enable three games;
-    # order; plaintext; accept plaintext; save.
-    answers = (
-        "main\nn\nltuid=123; ltoken=test-secret-123\n"
-        "1\ny\n1\ny\n1\ny\n1\n1\n1\n2\ny\ny\n"
-    )
+    # Account; decline browser; hidden cookie; select three games;
+    # accept default order; plaintext; explicit consent; save.
+    answers = "main\nn\nltuid=123; ltoken=test-secret-123\n1\n1\n1\ny\n2\ny\n1\n"
     with (
         patch("hoyo_cli.commands.init.config_path", return_value=config),
         patch("hoyo_cli.commands.init.credentials_path", return_value=secrets),
@@ -162,7 +160,7 @@ def test_cli_init_hidden_cookie_and_config_inspection(
     assert "test-secret-123" not in result.output
 
 
-def test_cli_invalid_cookie_has_exit_three_and_no_echo(
+def test_cli_invalid_cookie_offers_recovery_and_eof_cancels_without_echo(
     tmp_path: Path, runner: CliRunner
 ) -> None:
     with patch(
@@ -171,7 +169,8 @@ def test_cli_invalid_cookie_has_exit_three_and_no_echo(
         result = runner.invoke(
             main, ["init"], input="main\nn\nltoken=test-secret-123\n"
         )
-    assert result.exit_code == 3
+    assert result.exit_code == 1
+    assert "Session recovery" in result.output
     assert "test-secret-123" not in result.output
     assert "Traceback" not in result.output
 
@@ -224,7 +223,7 @@ def test_cli_browser_lock_recovery_is_actionable_and_secret_safe(
     if recovery == "manual":
         answers += "ltuid=123; ltoken=test-secret-123\n"
     if recovery != "cancel":
-        answers += "1\ny\n1\ny\n1\ny\n1\n1\n1\n2\ny\ny\n"
+        answers += "1\n1\n1\ny\n2\ny\n1\n"
     with (
         patch("hoyo_cli.commands.init.config_path", return_value=config),
         patch("hoyo_cli.commands.init.credentials_path", return_value=secrets),
@@ -260,13 +259,15 @@ def test_invalid_setup_never_persists(tmp_path: Path, stage: str) -> None:
             return super().discover(credentials)
 
     class InvalidIO(FakeIO):
-        def confirm(self, prompt: str) -> bool:
-            if stage == "no-enabled" and prompt.startswith("Enable"):
-                return False
-            return super().confirm(prompt)
+        def choose(self, prompt: str, choices: Sequence[str]) -> str:
+            if stage == "no-enabled" and prompt.startswith("Character"):
+                return "Skip this game"
+            if prompt in ("Session recovery", "Account recovery"):
+                return "Cancel (no changes)"
+            return super().choose(prompt, choices)
 
     io = InvalidIO(name="\n" if stage == "invalid-name" else "main")
-    with pytest.raises(AppError):
+    with pytest.raises(AppError if stage == "no-enabled" else click.Abort):
         run_init(
             tmp_path / "config.toml",
             tmp_path / "credentials.toml",
@@ -346,8 +347,10 @@ def test_unconfirmed_games_cannot_satisfy_the_enabled_game_requirement(
     original = config.read_bytes(), secrets.read_bytes()
 
     class DisableLinkedIO(FakeIO):
-        def confirm(self, prompt: str) -> bool:
-            return False if prompt.startswith("Enable") else super().confirm(prompt)
+        def choose(self, prompt: str, choices: Sequence[str]) -> str:
+            if prompt.startswith("Character"):
+                return "Skip this game"
+            return super().choose(prompt, choices)
 
     discovery = FakeDiscovery()
     only_genshin: dict[GameId, tuple[CharacterRef, ...]] = {
@@ -413,10 +416,10 @@ def test_undiscovered_disabled_games_stay_disabled_without_a_warning(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     class OnlyEnableGenshinIO(FakeIO):
-        def confirm(self, prompt: str) -> bool:
-            if prompt in ("Enable hsr?", "Enable zzz?"):
-                return False
-            return super().confirm(prompt)
+        def choose(self, prompt: str, choices: Sequence[str]) -> str:
+            if prompt in ("Character for hsr", "Character for zzz"):
+                return "Skip this game"
+            return super().choose(prompt, choices)
 
     config, secrets = tmp_path / "config.toml", tmp_path / "credentials.toml"
     discovery = FakeDiscovery()
@@ -480,11 +483,11 @@ def test_config_change_at_confirmation_is_not_overwritten(tmp_path: Path) -> Non
     original_secrets = secrets.read_bytes()
 
     class EditingIO(FakeIO):
-        def confirm(self, prompt: str) -> bool:
+        def choose(self, prompt: str, choices: Sequence[str]) -> str:
             if prompt.startswith("Save"):
                 with config.open("a") as stream:
                     stream.write("\n# concurrent user edit\n")
-            return super().confirm(prompt)
+            return super().choose(prompt, choices)
 
     with pytest.raises(AppError, match="changed"):
         run_init(config, secrets, EditingIO(), FakeBrowser(), FakeDiscovery())
@@ -790,6 +793,10 @@ def test_slow_browser_work_shows_stages_and_clears_before_prompts(
             self.check_stopped()
             return super().confirm(prompt)
 
+        def secret(self, prompt: str) -> str:
+            self.check_stopped()
+            return super().secret(prompt)
+
     class SlowBrowser(FakeBrowser):
         def import_session(self, source_id: str) -> Credentials:
             time.sleep(0.03)
@@ -977,6 +984,7 @@ def test_discovery_groups_three_games_and_keeps_multiple_characters() -> None:
     assert list(discovered) == ["genshin", "hsr", "zzz"]
     assert [c.uid for c in discovered["genshin"]] == [111111111, 111111112]
     assert discovered["zzz"][0].region == "test-region"
+    assert discovered["zzz"][0].label == "Test character (Test region)"
     assert client.calls == 1
     factory.assert_called_once_with(credentials)
 
@@ -1045,10 +1053,14 @@ def test_uid_enabled_flags_and_custom_order_are_selected(tmp_path: Path) -> None
                 return choices[1]
             if prompt == "Next game in display order":
                 return choices[-1]
+            if prompt == "Character for hsr":
+                return "Skip this game"
             return super().choose(prompt, choices)
 
         def confirm(self, prompt: str) -> bool:
-            return False if prompt == "Enable hsr?" else super().confirm(prompt)
+            if prompt == "Use the default game display order?":
+                return False
+            return super().confirm(prompt)
 
     class MultipleDiscovery(FakeDiscovery):
         def discover(
@@ -1071,7 +1083,7 @@ def test_uid_enabled_flags_and_custom_order_are_selected(tmp_path: Path) -> None
     parsed = load_config(config)
     assert parsed.game_order == ("zzz", "hsr", "genshin")
     assert parsed.accounts["main"].games["genshin"].uid == 111111112
-    assert not parsed.accounts["main"].games["hsr"].enabled
+    assert "hsr" not in parsed.accounts["main"].games
 
 
 def test_backend_change_keeps_old_secrets_without_migration(tmp_path: Path) -> None:
@@ -1131,9 +1143,368 @@ def test_declining_save_preserves_existing_files(tmp_path: Path) -> None:
     original = config.read_bytes(), secrets.read_bytes()
 
     class DeclineSaveIO(FakeIO):
-        def confirm(self, prompt: str) -> bool:
-            return False if prompt.startswith("Save") else super().confirm(prompt)
+        def choose(self, prompt: str, choices: Sequence[str]) -> str:
+            if prompt.startswith("Save"):
+                return "Cancel (no changes)"
+            return super().choose(prompt, choices)
 
     with pytest.raises(click.Abort):
         run_init(config, secrets, DeclineSaveIO(), FakeBrowser(), FakeDiscovery())
     assert (config.read_bytes(), secrets.read_bytes()) == original
+
+
+@pytest.mark.parametrize("width", [48, 70, 100])
+@pytest.mark.parametrize("color_policy", ["redirected", "no-color", "NO_COLOR"])
+def test_guided_setup_labels_identity_and_reviews_before_write(
+    tmp_path: Path, runner: CliRunner, width: int, color_policy: str
+) -> None:
+    config, secrets = tmp_path / "config.toml", tmp_path / "credentials.toml"
+    discovery = FakeDiscovery()
+    roles: dict[GameId, tuple[CharacterRef, ...]] = {
+        "genshin": (
+            CharacterRef("genshin", 111111111, "os_asia", "Traveler (Asia)"),
+            CharacterRef("genshin", 111111112, "os_usa", "Traveler (America)"),
+        ),
+        "hsr": (CharacterRef("hsr", 222222222, "prod_official_asia", "Stelle (Asia)"),),
+    }
+    # Account, manual session, second Genshin role, HSR role, default order,
+    # plaintext consent, then Enter to save the reviewed candidate.
+    answers = "main\nn\nltuid=123; ltoken=test-secret-123\n2\n1\ny\n2\ny\n\n"
+    with (
+        patch("hoyo_cli.commands.init.config_path", return_value=config),
+        patch("hoyo_cli.commands.init.credentials_path", return_value=secrets),
+        patch("hoyo_cli.commands.init.HoYoLABDiscovery", return_value=discovery),
+        patch.object(discovery, "discover", return_value=roles),
+    ):
+        result = runner.invoke(
+            main,
+            ["init", "--no-color"] if color_policy == "no-color" else ["init"],
+            input=answers,
+            env={
+                "COLUMNS": str(width),
+                "NO_COLOR": "1" if color_policy == "NO_COLOR" else None,
+            },
+        )
+    assert result.exit_code == 0, result.output
+    for step, label in enumerate(("Account", "Games", "Storage", "Review"), 1):
+        assert f"Step {step}/4" in result.output and label in result.output
+    assert result.output.index("GENSHIN IMPACT") < result.output.index("Traveler")
+    assert result.output.index("HONKAI: STAR RAIL") < result.output.index("Stelle")
+    assert "Account: main" in result.output
+    assert "Asia" in result.output and "America" in result.output
+    assert "os_asia" not in result.output and "prod_official_asia" not in result.output
+    assert "Skip this game" in result.output and "Enable genshin?" not in result.output
+    assert "No linked characters" in result.output
+    review = result.output.split("Step 4/4", 1)[1]
+    assert "UID 111111112" in review and "America" in review
+    assert "plaintext" in review and "Default account: main" in review
+    assert "Game order:" in review and "Cancel (no changes)" in review
+    assert "test-secret-123" not in result.output and "\x1b" not in result.output
+    parsed = load_config(config)
+    assert parsed.accounts["main"].games["genshin"].uid == 111111112
+    assert len(parsed.accounts["main"].games) == 2
+
+
+def test_skipping_game_does_not_select_or_enable_a_character(tmp_path: Path) -> None:
+    class SkipIO(FakeIO):
+        def choose(self, prompt: str, choices: Sequence[str]) -> str:
+            if prompt == "Character for hsr":
+                assert "Skip this game" in choices
+                return "Skip this game"
+            return super().choose(prompt, choices)
+
+    config = tmp_path / "config.toml"
+    io = SkipIO()
+    run_init(config, tmp_path / "credentials.toml", io, FakeBrowser(), FakeDiscovery())
+    account = load_config(config).accounts["main"]
+    assert "hsr" not in account.games
+    assert account.games["genshin"].enabled and account.games["zzz"].enabled
+    assert not any(prompt.startswith("Enable") for prompt in io.prompts)
+
+
+def test_narrow_review_keeps_short_character_and_uid_together(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from hoyo_cli.render import setup
+
+    console = Console(width=48, color_system=None, markup=False, highlight=False)
+    discovery = FakeDiscovery()
+    characters = discovery.discover(
+        parse_cookie_header("ltuid=123; ltoken=test-secret-123")
+    )
+    characters["zzz"] = (CharacterRef("zzz", 333333333, "test", "Proxy (Asia)"),)
+    with (
+        patch.object(setup, "make_console", return_value=console),
+        patch.object(discovery, "discover", return_value=characters),
+    ):
+        run_init(
+            tmp_path / "config.toml",
+            tmp_path / "credentials.toml",
+            FakeIO(),
+            FakeBrowser(),
+            discovery,
+        )
+    review = capsys.readouterr().out.split("Step 4/4", 1)[1]
+    assert "Proxy (Asia) | UID 333333333" in review
+
+
+@pytest.mark.parametrize("raw", ["", "ltoken=test-secret-123", "invalid-secret"])
+def test_manual_cookie_input_recovers_locally_without_discovery_on_bad_input(
+    tmp_path: Path, raw: str, capsys: pytest.CaptureFixture[str]
+) -> None:
+    class RetryIO(FakeIO):
+        def secret(self, prompt: str) -> str:
+            self.prompts.append(prompt)
+            return raw if self.prompts.count(prompt) == 1 else super().secret(prompt)
+
+        def choose(self, prompt: str, choices: Sequence[str]) -> str:
+            if prompt == "Session recovery":
+                return "Paste Cookie header again"
+            return super().choose(prompt, choices)
+
+    io, discovery = RetryIO(), FakeDiscovery()
+    with patch.object(discovery, "discover", wraps=discovery.discover) as verify:
+        run_init(
+            tmp_path / "config.toml",
+            tmp_path / "credentials.toml",
+            io,
+            FakeBrowser(),
+            discovery,
+        )
+    assert verify.call_count == 1 and io.prompts.count("Account name") == 1
+    output = capsys.readouterr()
+    assert "Error:" in output.err
+    assert "test-secret-123" not in output.out + output.err
+    assert "invalid-secret" not in output.out + output.err
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        AuthenticationError("Expired"),
+        NetworkError("Timed out"),
+        {},
+    ],
+)
+def test_manual_discovery_retry_keeps_account_and_in_memory_session(
+    tmp_path: Path, failure: object
+) -> None:
+    class RetryIO(FakeIO):
+        def choose(self, prompt: str, choices: Sequence[str]) -> str:
+            if prompt == "Session recovery":
+                return "Retry session verification"
+            return super().choose(prompt, choices)
+
+    discovery, io = FakeDiscovery(), RetryIO()
+    good = discovery.discover(parse_cookie_header("ltuid=123; ltoken=test-secret-123"))
+    with patch.object(discovery, "discover", side_effect=[failure, good]) as verify:
+        run_init(
+            tmp_path / "config.toml",
+            tmp_path / "credentials.toml",
+            io,
+            FakeBrowser(),
+            discovery,
+        )
+    assert verify.call_count == 2
+    assert verify.call_args_list[0].args[0] is verify.call_args_list[1].args[0]
+    assert io.prompts.count("Full HoYoLAB Cookie header (hidden)") == 1
+    assert io.prompts.count("Account name") == 1
+
+
+def test_final_review_precedes_writes_and_explicit_cancel_has_no_changes(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    class ReviewIO(FakeIO):
+        def choose(self, prompt: str, choices: Sequence[str]) -> str:
+            if prompt.startswith("Save"):
+                output = capsys.readouterr().out
+                assert "Step 4/4" in output and "UID 333333333" in output
+                assert "Credential storage: plaintext" in output
+                assert not config.exists() and not secrets.exists()
+                return "Cancel (no changes)"
+            return super().choose(prompt, choices)
+
+    config, secrets = tmp_path / "config.toml", tmp_path / "credentials.toml"
+    with patch("hoyo_cli.commands.init.commit_config") as commit:
+        with pytest.raises(click.Abort):
+            run_init(config, secrets, ReviewIO(), FakeBrowser(), FakeDiscovery())
+    commit.assert_not_called()
+    assert not config.exists() and not secrets.exists()
+    assert "Setup cancelled; no changes saved." in capsys.readouterr().out
+
+
+@pytest.mark.parametrize(
+    "stage", ["Character for genshin", "Credential backend", "Save"]
+)
+def test_forged_setup_selection_is_rejected_without_writes(
+    tmp_path: Path, stage: str
+) -> None:
+    class ForgedIO(FakeIO):
+        def choose(self, prompt: str, choices: Sequence[str]) -> str:
+            if prompt.startswith(stage):
+                return "forged-out-of-menu"
+            return super().choose(prompt, choices)
+
+    config, secrets = tmp_path / "config.toml", tmp_path / "credentials.toml"
+    with pytest.raises(AppError, match="Invalid setup selection"):
+        run_init(config, secrets, ForgedIO(), FakeBrowser(), FakeDiscovery())
+    assert not config.exists() and not secrets.exists()
+
+
+def test_rejected_manual_session_can_change_source_without_restarting_account(
+    tmp_path: Path,
+) -> None:
+    class SourceIO(FakeIO):
+        def choose(self, prompt: str, choices: Sequence[str]) -> str:
+            if prompt == "Session recovery":
+                return "Change credential source"
+            return super().choose(prompt, choices)
+
+        def confirm(self, prompt: str) -> bool:
+            if prompt.startswith("Import"):
+                self.prompts.append(prompt)
+                return self.prompts.count(prompt) == 2
+            return super().confirm(prompt)
+
+        def secret(self, prompt: str) -> str:
+            self.prompts.append(prompt)
+            return "ltuid=456; ltoken=rejected-secret"
+
+    config, secrets = tmp_path / "config.toml", tmp_path / "credentials.toml"
+    io, discovery, browser = SourceIO(browser=True), FakeDiscovery(), FakeBrowser()
+    good = discovery.discover(parse_cookie_header("ltuid=123; ltoken=test-secret-123"))
+    with patch.object(
+        discovery, "discover", side_effect=[AuthenticationError("Expired"), good]
+    ):
+        run_init(config, secrets, io, browser, discovery)
+    assert browser.imported == ["edge"]
+    assert io.prompts.count("Account name") == 1
+    stored = PlaintextStore(secrets).get("main")
+    assert stored and stored.fields["ltuid"] == "123"
+
+
+@pytest.mark.parametrize(
+    "signal", [click.Abort, KeyboardInterrupt, asyncio.CancelledError]
+)
+def test_manual_recovery_cancellation_preserves_existing_bytes(
+    tmp_path: Path, signal: type[BaseException]
+) -> None:
+    config, secrets = tmp_path / "config.toml", tmp_path / "credentials.toml"
+    run_init(config, secrets, FakeIO(), FakeBrowser(), FakeDiscovery())
+    before = config.read_bytes(), secrets.read_bytes()
+
+    class CancelIO(FakeIO):
+        def secret(self, prompt: str) -> str:
+            return ""
+
+        def choose(self, prompt: str, choices: Sequence[str]) -> str:
+            if prompt == "Session recovery":
+                raise signal()
+            return super().choose(prompt, choices)
+
+    with patch("hoyo_cli.commands.init.open_store") as storage:
+        with pytest.raises(signal):
+            run_init(config, secrets, CancelIO(), FakeBrowser(), FakeDiscovery())
+    storage.assert_not_called()
+    assert (config.read_bytes(), secrets.read_bytes()) == before
+
+
+def test_invalid_account_name_can_be_corrected_before_session_input(
+    tmp_path: Path,
+) -> None:
+    class NameIO(FakeIO):
+        def choose(self, prompt: str, choices: Sequence[str]) -> str:
+            if prompt == "Account name":
+                self.prompts.append(prompt)
+                return "\x1bwrong" if self.prompts.count(prompt) == 1 else "corrected"
+            return super().choose(prompt, choices)
+
+    config = tmp_path / "config.toml"
+    run_init(
+        config, tmp_path / "credentials.toml", NameIO(), FakeBrowser(), FakeDiscovery()
+    )
+    assert load_config(config).default_account == "corrected"
+
+
+def test_review_decline_does_not_put_credentials_in_keyring(tmp_path: Path) -> None:
+    class DeclineIO(FakeIO):
+        def choose(self, prompt: str, choices: Sequence[str]) -> str:
+            if prompt.startswith("Save"):
+                return "Cancel (no changes)"
+            return super().choose(prompt, choices)
+
+    store = KeyringStore(MemoryKeyring())
+    with (
+        patch("hoyo_cli.commands.init.open_store", return_value=store),
+        patch.object(store, "put") as put,
+        patch.object(store, "checkpoint") as checkpoint,
+    ):
+        with pytest.raises(click.Abort):
+            run_init(
+                tmp_path / "config.toml",
+                tmp_path / "credentials.toml",
+                DeclineIO(backend="keyring"),
+                FakeBrowser(),
+                FakeDiscovery(),
+            )
+    put.assert_not_called()
+    checkpoint.assert_not_called()
+
+
+def test_backend_change_needs_separate_sensitive_consent(tmp_path: Path) -> None:
+    config, secrets = tmp_path / "config.toml", tmp_path / "credentials.toml"
+    run_init(config, secrets, FakeIO(), FakeBrowser(), FakeDiscovery())
+    before = config.read_bytes(), secrets.read_bytes()
+
+    class DeclineIO(FakeIO):
+        def confirm(self, prompt: str) -> bool:
+            if prompt == "Change this account's credential backend?":
+                return False
+            return super().confirm(prompt)
+
+    with patch(
+        "hoyo_cli.commands.init.open_store", return_value=KeyringStore(MemoryKeyring())
+    ):
+        with pytest.raises(click.Abort):
+            run_init(
+                config,
+                secrets,
+                DeclineIO(backend="keyring"),
+                FakeBrowser(),
+                FakeDiscovery(),
+            )
+    assert (config.read_bytes(), secrets.read_bytes()) == before
+
+
+@pytest.mark.parametrize("action", ["plaintext", "overwrite"])
+def test_sensitive_consent_defaults_to_no_in_real_command(
+    tmp_path: Path, runner: CliRunner, action: str
+) -> None:
+    config, secrets = tmp_path / "config.toml", tmp_path / "credentials.toml"
+    if action == "overwrite":
+        run_init(config, secrets, FakeIO(), FakeBrowser(), FakeDiscovery())
+    before = (
+        config.read_bytes() if config.exists() else None,
+        secrets.read_bytes() if secrets.exists() else None,
+    )
+    answers = (
+        "1\n\n"
+        if action == "overwrite"
+        else ("main\nn\nltuid=123; ltoken=test-secret-123\n\n\n\n\n2\n\n")
+    )
+    with (
+        patch("hoyo_cli.commands.init.config_path", return_value=config),
+        patch("hoyo_cli.commands.init.credentials_path", return_value=secrets),
+        patch("hoyo_cli.commands.init.HoYoLABDiscovery", return_value=FakeDiscovery()),
+    ):
+        result = runner.invoke(main, ["init"], input=answers)
+    assert result.exit_code == 1, result.output
+    assert (
+        "[y/N]" in result.output
+        and "Setup cancelled; no changes saved." in result.output
+    )
+    assert "Configured account" not in result.output
+    assert (
+        config.read_bytes() if config.exists() else None,
+        secrets.read_bytes() if secrets.exists() else None,
+    ) == before

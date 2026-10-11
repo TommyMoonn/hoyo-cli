@@ -410,7 +410,7 @@ def test_commented_config_survives_init(
         game: (CharacterRef(game, uid + 1, "test", f"Updated {game}"),)
         for game, uid in TEST_UIDS.items()
     }
-    # Replace consent, choose session source, three character/enabled
+    # Replace consent, choose session source, three character
     # choices, default consent, keep order, backend, optional plaintext consent, save.
     backend_answers = "1\n" if acceptance_env.backend == "keyring" else "2\ny\n"
     session_answers = "n\n" + TEST_COOKIE + "\n"
@@ -426,9 +426,7 @@ def test_commented_config_survives_init(
             BrowserProfile("chrome", "chrome", "Library-selected profile"),
         )
         session_answers = "y\n2\n"
-    answers = (
-        "y\n" + session_answers + "1\ny\n1\ny\n1\ny\ny\ny\n" + backend_answers + "y\n"
-    )
+    answers = "y\n" + session_answers + "1\n1\n1\ny\ny\n" + backend_answers + "1\n"
     result = runner.invoke(main, ["init", "--account", "main"], input=answers)
     assert result.exit_code == 0, result.output
     after = acceptance_env.config.read_text()
